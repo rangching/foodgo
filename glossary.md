@@ -82,3 +82,97 @@
 | 送出時違反不變條件（例如空訂單） | 422（模型擋下，API 照實回報） |
 | 對既有訂單做不允許的事（例如取消兩次） | 409 |
 | 找不到訂單 | 404 |
+
+## 事件驅動（第 3 集：從呼叫到通知）
+
+### 命令與事件
+
+| | 命令 Command | 事件 Event |
+|---|---|---|
+| 文法 | 祈使句：「開一張廚房單」`create_ticket()` | 過去式：「訂單已送出」`OrderPlaced` |
+| 對象 | 指定一個接收者，發的人要認識它 | 不指定，0 到很多個訂閱者，發的人不用認識 |
+| 能不能拒絕 | 可以：接收者可以丟例外、回錯誤 | 不能：事情已經發生了，只能決定自己要怎麼反應 |
+| 發的人等不等 | 等結果，對方掛了自己也跟著失敗 | 不等，交出去就好 |
+
+### 兩種事件
+
+| | 領域事件 Domain Event | 整合事件 Integration Event |
+|---|---|---|
+| 放在哪 | `foodgo.<上下文>.events` | `foodgo.contracts`（共同語言） |
+| 誰看得到 | 只有自己的上下文 | 任何訂閱的上下文 |
+| 可以放什麼 | 內部的東西都可以（例如帶 `Money` 的品項） | 只放 JSON 認得的型別，只放下游需要的事實 |
+| 能不能隨便改 | 可以，改了只影響自己 | 不行，有人照著讀；要守版本規則 |
+
+點餐的 `OrderPlaced` 領域事件帶著含單價的品項；`foodgo.ordering.integration.to_integration()` 把它翻成 `contracts.OrderPlaced`，翻譯時把價格留在點餐裡。
+廚房的 `MealReady` 領域事件（第 1 集）同理；廚房是支援子領域，模型簡單，這一集由 `Kitchen.mark_ready()` 直接公告 `contracts.MealReady`。
+
+### 共同語言 Published Language（`foodgo.contracts`）
+
+上下文之間只透過這裡的整合事件說話，彼此不 import。`foodgo.contracts` 只用標準函式庫，不認識任何上下文、共用核心或組裝點（第 4 條邊界規則）。
+每份格式由發布的上下文維護：`contracts/ordering.py` 歸點餐、`contracts/kitchen.py` 歸廚房。
+
+每一則整合事件都是同一種 JSON 信封：
+
+```json
+{
+  "type": "OrderPlaced",
+  "schema_version": 1,
+  "event_id": "8b0e…",
+  "occurred_at": "2026-11-06T02:15:08+00:00",
+  "data": {"order_id": "A001", "restaurant_id": "R007",
+           "items": [{"name": "牛肉麵", "quantity": 1}, {"name": "紅茶", "quantity": 1}],
+           "note": "不要香菜"}
+}
+```
+
+| 欄位 | 意思 |
+|---|---|
+| `type` | 事件名稱，過去式，和類別名稱一樣 |
+| `schema_version` | `data` 的格式第幾版 |
+| `event_id` | 這一則事件的編號（UUID 字串）；點餐翻譯時沿用領域事件的編號 |
+| `occurred_at` | 事情發生的時間，ISO 8601、UTC |
+| `data` | 事件本身的資料 |
+
+### 整合事件放什麼、不放什麼
+
+原則：只放訂閱者**現在**要用的事實。加欄位很容易，拿掉欄位很難——一旦發布，就有人照著讀。
+
+| 事件 | 發布 | 訂閱 | 放 | 不放（為什麼） |
+|---|---|---|---|---|
+| `OrderPlaced` v1 | 點餐 | 廚房 | `order_id`、`restaurant_id`、`items`（菜名、份數）、`note` | 單價、外送費、合計：廚房不看價格。`customer_id`、送達地址：廚房用不到，個資能少傳就少傳 |
+| `MealReady` v1 | 廚房 | （練習：外送） | `order_id`、`ticket_id`、`restaurant_id`（到哪裡取餐） | 菜名、備註：外送不在乎菜怎麼做 |
+
+`OrderCancelled` 目前沒有別的上下文要聽，先不放進共同語言；等有人需要時再加。之後付款要金額、外送要地址時，也照同一條原則決定加在哪裡。
+
+### 版本規則（`schema_version`）
+
+1. **只加欄位**：不升版。舊的訂閱者略過不認得的欄位，照樣能讀（寬容讀取）。
+2. **拿掉欄位、改名、改型別、改意思**：升 `schema_version`。訂閱者遇到不認得的版本就拒收，丟 `ValueError`，不會讀錯。
+3. `type` 不對（拿 `OrderPlaced` 當 `MealReady` 讀）也一樣拒收。
+
+### 事件匯流排 `EventBus`（`foodgo.shared.bus`）
+
+| 詞 | 程式名稱 | 意思 |
+|---|---|---|
+| 發布 | `bus.publish(event)` | 把事件交給匯流排；發布者不知道、也不用知道誰在聽 |
+| 訂閱 | `bus.subscribe(事件類別, 處理函式)` | 「這種事件發生時叫我」。訂閱關係寫在組裝點 `app.py` |
+| 處理函式 | 例如 `Kitchen.on_order_placed` | 收到事件後做自己的事；名稱一律 `on_事件` |
+| 沒送到的事件 | `bus.dead_letters`（`GET /bus/dead-letters`） | 處理函式丟例外時，事件、處理函式與錯誤記在這裡，不傳回發布者 |
+
+匯流排先把事件轉成 JSON，再替每個訂閱者各還原一份：上下文之間只傳資料，不傳物件。
+
+這一集的限制（第 4 集用 Kafka 解決）：
+
+- 只在同一個程序裡：程式一關，沒處理完的事件就不見了。
+- `dead_letters` 只是記下來，不會重試；廚房恢復後也不會補開那張廚房單。
+- 訂閱者還是在下單的同一個請求裡執行：廚房慢，下單就跟著慢。
+
+### 廚房單（第 3 集）
+
+| 詞 | 程式名稱 | 種類 | 意思 |
+|---|---|---|---|
+| 廚房單 | `Ticket` | 實體 | 收到 `OrderPlaced` 就開一張，編號 T001、T002…；只記 `order_id`，不認識點餐的物件 |
+| 菜 | `Dish` | 值物件 | 菜名與份數，沒有價格 |
+| 廚房單狀態 | `TicketStatus` | 列舉 | 已收單 `received` → 餐點已備妥 `ready` |
+| 出餐 | `Kitchen.mark_ready()`（`POST /tickets/{id}/ready`） | 方法 | 廚房單標成備妥，公告 `MealReady`；出過餐的不能再出一次（409） |
+| 廚房當機 | `KitchenDown`（`FOODGO_FAULT_KITCHEN=crash`） | 故障注入 | 開廚房單時丟例外，用來示範「廚房掛了，下單照樣成功」 |

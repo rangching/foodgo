@@ -21,3 +21,12 @@ uv run fastapi dev            # 入口寫在 pyproject.toml 的 [tool.fastapi]
 ```
 
 打開 <http://127.0.0.1:8000/docs> 就能試 `POST /orders`。不用 FastAPI CLI 也可以：`uv run uvicorn foodgo.app:app --reload`。
+
+## 看事件流過去（第 3 集起）
+
+```bash
+uv run fastapi dev                              # 下單後 GET /tickets 看廚房單
+FOODGO_FAULT_KITCHEN=crash uv run fastapi dev   # 模擬廚房當機：下單照樣 201
+```
+
+伺服器的紀錄會印出「點餐：發布 OrderPlaced A001」「廚房：開廚房單 T001…」。廚房當機時，沒送到的事件在 <http://127.0.0.1:8000/bus/dead-letters>。

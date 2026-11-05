@@ -32,3 +32,16 @@ source_modules =
     foodgo.delivery
 forbidden_modules =
     foodgo.app
+
+[importlinter:contract:contracts]
+name = 共同語言不認識任何上下文
+type = forbidden
+source_modules =
+    foodgo.contracts
+forbidden_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.shared
+    foodgo.app

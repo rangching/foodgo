@@ -126,7 +126,13 @@ class Order:
             raise OrderRuleViolation("訂單至少要有一個品項")
         self._status = OrderStatus.PLACED
         self._events.append(
-            OrderPlaced(order_id=self.order_id, customer_id=self.customer_id, restaurant_id=self.restaurant_id)
+            OrderPlaced(
+                order_id=self.order_id,
+                customer_id=self.customer_id,
+                restaurant_id=self.restaurant_id,
+                lines=self.lines,
+                note=self.note,
+            )
         )
 
     def cancel(self, reason: str) -> None:
