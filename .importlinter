@@ -1,0 +1,22 @@
+[importlinter]
+root_package = foodgo
+
+[importlinter:contract:contexts]
+name = 四個上下文彼此獨立
+type = independence
+modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+
+[importlinter:contract:shared]
+name = 共用核心不認識任何上下文
+type = forbidden
+source_modules =
+    foodgo.shared
+forbidden_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery

@@ -1,0 +1,20 @@
+[project]
+name = "foodgo"
+version = "0.1.0"
+description = "好食快送：線上訂餐外送"
+readme = "README.md"
+authors = [
+    { name = "cliff wu", email = "54541999+rangching@users.noreply.github.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.15",
+    "pytest>=9.2.0",
+]
