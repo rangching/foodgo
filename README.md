@@ -68,3 +68,12 @@ uv run python -m foodgo.kitchen.consumer   # 廚房：Kafka → 廚房單（cons
 
 埠號（15432、19092、18080）被占用時：`cp .env.example .env` 改埠號，Python 程式改用 `uv run --env-file .env …` 啟動。
 全部清掉重來：`docker compose down -v`。
+
+## 狀態是事件的總和（第 5 集，不用 Docker）
+
+```bash
+uv run python demos/ep05_history.py          # 同一張 A001：CRUD 的最後一列 vs 事件流、fold、兩個人同時取消
+uv run python demos/ep05_history.py fold     # 只看其中一段：crud／events／fold／race
+```
+
+`foodgo.ordering.fold` 的 `evolve()`／`fold()` 從事件算出訂單狀態與版本號；`foodgo.shared.event_store` 是記憶體版的事件儲存（`expected_version` 對不上就丟 `ConcurrencyConflict`）。第 6 集換成 PostgreSQL。

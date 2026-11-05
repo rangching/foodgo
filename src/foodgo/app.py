@@ -44,7 +44,7 @@ def create_app(
             on_startup()
         yield
 
-    app = FastAPI(title="好食快送 FoodGo", version="0.4.0", lifespan=lifespan)
+    app = FastAPI(title="好食快送 FoodGo", version="0.5.0", lifespan=lifespan)
     app.include_router(ordering_api.build_router(orders))
     app.include_router(kitchen_api.build_router(kitchen))
 

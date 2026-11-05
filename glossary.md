@@ -229,3 +229,62 @@
 - 程序一關事件就不見 → 事件先在 PostgreSQL 的 outbox，再到 Kafka，兩邊都存在硬碟上。
 - 不會重試 → consumer 沒提交就會再收到；relay 沒標記就會再送。
 - 廚房慢下單也慢 → API 只寫資料庫；relay、廚房 consumer 是另外的程序。
+
+## 事件溯源（第 5 集：狀態是事件的總和）
+
+### CRUD 只留結果，事件留下過程
+
+| | CRUD（第 2～4 集的 `orders` 表） | 事件溯源 Event Sourcing |
+|---|---|---|
+| 存什麼 | 現在長怎樣：一張訂單一列，每次 `UPDATE` 蓋掉舊的 | 發生過哪些事：一張訂單一串事件，只往後加 |
+| A001 留下 | 最後一列：`cancelled`、兩個品項、`updated_at` 是取消的時間 | 5 個事件：建立草稿、加牛肉麵、加紅茶、送出、取消（含理由） |
+| 現在的狀態 | 直接讀那一列 | 用算的：`state = fold(events)` |
+| 過去某一刻 | 不知道，除非另外寫歷史表 | 只套前面幾個事件：`fold(events[:4])` 就是送出那一刻 |
+| 改錯了 | 舊值被蓋掉就沒了 | 不改舊事件，再加一個新事件更正 |
+
+第 4 集的 `orders` 表沒有放取消理由的欄位，`OrderCancelled` 也不進 outbox：在 CRUD 的世界裡，「顧客改變心意」這句話存檔後就不見了。
+
+### 點餐的事件流
+
+Order 的每個動作對應一個事件，照順序套上去就能算回整張訂單（第 6 集起由 `Order` 的方法發出，這一集先手寫）：
+
+| 順序 | 事件 | 程式名稱 | 對應的動作 | 帶什麼 | `evolve` 怎麼改狀態 |
+|---|---|---|---|---|---|
+| 1 | 訂單草稿已建立 | `OrderDrafted` | `Order(...)` | 訂單編號、顧客、餐廳、送達地址、外送費、備註 | 從無到有：`draft`、還沒有品項 |
+| 2… | 品項已加入 | `ItemAdded` | `add_line()` | 菜名、單價、數量 | 品項接在後面 |
+| | 訂單已送出 | `OrderPlaced` | `place()` | （第 1 集就有） | `placed`；品項以 `ItemAdded` 為準，`OrderPlaced.lines` 是給廚房的快照 |
+| | 訂單已取消 | `OrderCancelled` | `cancel(reason)` | 理由 | `cancelled` |
+
+`OrderDrafted`、`ItemAdded` 是點餐自己的領域事件，不進 Event Storming 的 11 張便利貼、也不對外公告（`to_integration()` 回 `None`，不寫進 outbox）。
+
+### 詞
+
+| 詞 | 程式名稱 | 意思 |
+|---|---|---|
+| 事件溯源 | Event Sourcing | 只存事件，狀態用事件算出來 |
+| 狀態 | `OrderState`（`foodgo.ordering.fold`） | 某一刻的訂單；frozen dataclass，算出來就不能改 |
+| 演進 | `evolve(state, event) -> state` | 套上一個事件、回傳新的狀態。純函式：不碰資料庫、不看時鐘、不改舊狀態；不檢查業務規則（事件是已經發生的事實） |
+| 摺疊 | `fold(events) -> state` | 從第一個事件套到最後一個（`reduce(evolve, events, None)`）；沒有事件回 `None`；認不得的事件丟 `TypeError`，不默默略過 |
+| 事件流 stream | `stream_id`（訂單編號，例如 `A001`） | 同一張訂單的所有事件，照發生順序排好 |
+| 版本 version | `OrderState.version`、`RecordedEvent.version` | 這條流的第幾個事件，從 1 開始；狀態的版本＝已經套用了幾個事件；還沒有事件的流是第 0 版 |
+| 事件儲存 | `InMemoryEventStore`（`foodgo.shared.event_store`） | 只能 `append`、`load`，沒有改、沒有刪；第 6 集換成 PostgreSQL 的 `events` 表 |
+| 一列事件 | `RecordedEvent` | `stream_id`、`version`、`type`、`occurred_at`、事件本身；`(stream_id, version)` 不會重複 |
+| 預期版本 | `append(stream_id, events, expected_version=…)` | 「我讀到的是第幾版」；新的流是 0 |
+| 樂觀併發 | `ConcurrencyConflict` | 先不鎖，寫的時候才比對版本：對不上就是有人先寫了，整批不寫。重讀、用新的狀態重新判斷規則，再決定要不要寫 |
+
+為什麼要樂觀併發：顧客 App 和客服後台同時讀到第 4 版（`placed`），都覺得可以取消。沒有 `expected_version` 的話兩個 `OrderCancelled` 都會寫進去——「已取消不能再取消」就被繞過了。有了它，第二個人會拿到 `ConcurrencyConflict`，重讀後看到 `cancelled`，`Order` 的規則就擋下來。
+
+### 什麼時候不該用事件溯源
+
+事件溯源的代價：要多寫事件與 `evolve`、事件格式一旦存下去就要一直讀得懂（升版、轉換）、查詢要另外做讀模型（第 9 集）、「改錯資料」不能直接 `UPDATE`。值得付這個代價的，是**過程本身有意義**的東西。
+
+| FoodGo 裡的東西 | 用什麼 | 為什麼 |
+|---|---|---|
+| 訂單（點餐） | 事件溯源（第 6 集） | 流程長、狀態多、會被併發修改；「什麼時候送出、為什麼取消」客服與對帳都要查；後面的 Saga、追蹤頁都靠這串事件 |
+| 菜單、菜價 | CRUD | 店家改價格就是改價格，沒人問「上週二下午這道菜的說明改過幾次」；訂單需要的價格已經寫在 `ItemAdded.unit_price` 裡 |
+| 餐廳資料（店名、地址、營業時間） | CRUD | 就是一張資料表；要留修改紀錄的話，加一張稽核表就夠了 |
+| 顧客的帳號資料 | CRUD | 個資要能真的改、真的刪；事件只能往後加，刪不掉 |
+| 廚房單 | CRUD（第 4 集的 `tickets`） | 支援子領域，狀態只有收單 → 備妥；它要的過程已經在 Kafka 的事件裡 |
+| 報表、看板 | 讀模型（第 9 集） | 從事件投影出來的表，壞了就砍掉重建 |
+
+判斷的問題：要不要回答「當時是什麼樣子、怎麼變成這樣」？會不會有人同時改同一筆？事件本身是不是業務上的事實？三個都是「否」，CRUD 就好。
