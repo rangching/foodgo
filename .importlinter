@@ -45,3 +45,17 @@ forbidden_modules =
     foodgo.delivery
     foodgo.shared
     foodgo.app
+
+[importlinter:contract:infra]
+name = 基礎設施不認識任何上下文
+type = forbidden
+source_modules =
+    foodgo.infra
+forbidden_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.contracts
+    foodgo.shared
+    foodgo.app

@@ -1,12 +1,9 @@
 """點餐的 HTTP 入口：把請求翻成模型的方法呼叫，再把結果翻回 HTTP。規則不寫在這裡。"""
-from collections.abc import Callable
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from foodgo.ordering.model import Address, Money, Order, OrderRuleViolation
 from foodgo.ordering.repository import OrderRepository
-from foodgo.shared.events import DomainEvent
 
 
 class LineIn(BaseModel):
@@ -89,13 +86,8 @@ class OrderOut(BaseModel):
         )
 
 
-def build_router(orders: OrderRepository, publish: Callable[[DomainEvent], None]) -> APIRouter:
+def build_router(orders: OrderRepository) -> APIRouter:
     router = APIRouter(prefix="/orders", tags=["點餐"])
-
-    def save_and_publish(order: Order) -> None:
-        orders.save(order)
-        for event in order.pull_events():
-            publish(event)
 
     def find(order_id: str) -> Order:
         order = orders.get(order_id)
@@ -119,7 +111,7 @@ def build_router(orders: OrderRepository, publish: Callable[[DomainEvent], None]
             order.place()
         except OrderRuleViolation as e:
             raise HTTPException(422, str(e))  # 這張訂單本身不成立
-        save_and_publish(order)
+        orders.save(order)  # 存訂單，事件也一起交出去
         return OrderOut.of(order)
 
     @router.get("/{order_id}", summary="查一張訂單")
@@ -133,7 +125,7 @@ def build_router(orders: OrderRepository, publish: Callable[[DomainEvent], None]
             order.cancel(body.reason)
         except OrderRuleViolation as e:
             raise HTTPException(409, str(e))  # 和訂單目前的狀態衝突
-        save_and_publish(order)
+        orders.save(order)
         return OrderOut.of(order)
 
     return router

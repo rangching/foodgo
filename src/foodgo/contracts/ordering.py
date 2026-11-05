@@ -4,6 +4,8 @@ from typing import Any, Self
 
 from foodgo.contracts.base import IntegrationEvent
 
+ORDERING_TOPIC = "ordering.events"  # 點餐的整合事件都送到這個 Kafka topic；key 是 order_id
+
 
 @dataclass(frozen=True, kw_only=True)
 class OrderItem:

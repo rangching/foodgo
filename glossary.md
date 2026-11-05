@@ -176,3 +176,56 @@
 | 廚房單狀態 | `TicketStatus` | 列舉 | 已收單 `received` → 餐點已備妥 `ready` |
 | 出餐 | `Kitchen.mark_ready()`（`POST /tickets/{id}/ready`） | 方法 | 廚房單標成備妥，公告 `MealReady`；出過餐的不能再出一次（409） |
 | 廚房當機 | `KitchenDown`（`FOODGO_FAULT_KITCHEN=crash`） | 故障注入 | 開廚房單時丟例外，用來示範「廚房掛了，下單照樣成功」 |
+
+## 可靠地發與收（第 4 集：把事件交給 Kafka）
+
+### Kafka 的詞
+
+| 詞 | 意思 | FoodGo 裡 |
+|---|---|---|
+| broker | 存訊息、發訊息的 Kafka 伺服器 | 一台，KRaft 模式（自己兼 controller，不用 ZooKeeper） |
+| topic | 一條有名字、只會往後加的訊息紀錄；讀了也不會刪 | `ordering.events`：點餐的整合事件都在這裡（`contracts.ORDERING_TOPIC`） |
+| partition | topic 切成幾段，各自有順序；同一個 key 永遠進同一段 | 3 段；key＝`order_id`，同一張訂單的事件不會亂序 |
+| offset | 訊息在 partition 裡的位置（0、1、2…） | 廚房讀到哪裡，就記到哪個 offset |
+| consumer group | 一組一起讀同一個 topic 的程序，每段 partition 只交給組裡一個成員；讀到哪裡（offset）記在組的名字下 | `kitchen`；第 7 集付款、外送各自一組，互不影響 |
+| 提交 commit | 告訴 Kafka「這一則我處理完了」 | 處理完才提交；當掉沒提交，重啟後同一則會再收到一次 |
+| lag | 還沒處理的訊息數＝最新 offset − 已提交的 offset | Kafka UI 的 Consumers 頁；廚房停掉時會變大，重啟後回到 0 |
+
+### 雙寫問題
+
+「先寫資料庫、再送 Kafka」是兩個系統、兩次寫入，中間沒有交易包住：
+
+| 順序 | 中間當掉會怎樣 |
+|---|---|
+| 先 commit 訂單，再送事件 | 訂單成立了，事件沒送出去：廚房永遠不知道（掉事件） |
+| 先送事件，再 commit 訂單 | 廚房開了單，訂單卻沒存成功（幽靈事件） |
+
+### Transactional Outbox
+
+| 詞 | 程式名稱 | 意思 |
+|---|---|---|
+| outbox | `outbox` 表（`foodgo.infra.outbox`） | 要發的事件先寫進點餐自己的資料庫，**和訂單同一個交易**：要嘛都成功、要嘛都沒發生 |
+| 存訂單 | `PostgresOrderRepository.save()` | 一個交易裡：寫 `orders`，再把 `pull_events()` 翻成整合事件寫進 `outbox`；`OrderCancelled` 不公告，不寫 |
+| relay | `python -m foodgo.ordering.relay`（`outbox.relay_once()`） | 另一個程序：把 `sent_at IS NULL` 的列照順序送到 Kafka，Kafka 確認收到才標記 `sent_at` |
+| 重送 | `FOODGO_FAULT_RELAY=crash-after-send` | relay 送出後、標記前當掉：重啟會再送一次，Kafka 上出現同一則的兩份 |
+
+訊息格式：key＝`order_id`；value＝第 3 集的 JSON 信封（`to_json()`，原封不動）；header 帶 `event_id`、`type`（方便在 Kafka UI 上看）。
+
+### 至少一次送達＋冪等消費者
+
+- **至少一次（at-least-once）**：relay 和 consumer 都是「做完才記帳」，中間當掉就重做。不會掉，但可能重複。
+- **冪等（idempotent）**：同一則訊息處理一次和處理兩次，結果一樣。重複交給消費者自己擋。
+- 廚房用 `event_id` 判重：`processed_messages`（`consumer`、`event_id` 是主鍵）。開廚房單和記下「這則處理過了」寫在**同一個交易**（`PostgresTicketRepository.add()`），重送幾次都只開一張。
+
+| 詞 | 程式名稱 | 意思 |
+|---|---|---|
+| 廚房 consumer | `python -m foodgo.kitchen.consumer`（consumer group `kitchen`） | 讀 `ordering.events`，收到 `OrderPlaced` 開廚房單；其他事件略過 |
+| 處理過的訊息 | `processed_messages`（`foodgo.infra.inbox`） | 冪等消費者的帳本：哪個 consumer 處理過哪一則 `event_id` |
+| 處理過了 | `Kitchen.on_order_placed()` | 這則 `event_id` 記過了，就印「處理過了」、不再開單 |
+| 廚房當機 | `FOODGO_FAULT_KITCHEN=crash` | consumer 收到就當掉、不提交；訊息留在 Kafka，修好重啟會補開那張單 |
+
+第 3 集匯流排的三個限制，這一集的答案：
+
+- 程序一關事件就不見 → 事件先在 PostgreSQL 的 outbox，再到 Kafka，兩邊都存在硬碟上。
+- 不會重試 → consumer 沒提交就會再收到；relay 沒標記就會再送。
+- 廚房慢下單也慢 → API 只寫資料庫；relay、廚房 consumer 是另外的程序。

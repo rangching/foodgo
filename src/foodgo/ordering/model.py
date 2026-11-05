@@ -91,6 +91,32 @@ class Order:
         self._status = OrderStatus.DRAFT
         self._events: list[DomainEvent] = []
 
+    @classmethod
+    def restore(
+        cls,
+        *,
+        order_id: str,
+        customer_id: str,
+        restaurant_id: str,
+        delivery_address: Address,
+        delivery_fee: Money,
+        note: str,
+        lines: list[OrderLine],
+        status: OrderStatus,
+    ) -> "Order":
+        """給 Repository 用：照存下來的樣子把訂單擺回來。不檢查規則、不記事件——事情早就發生過了。"""
+        order = cls(
+            order_id=order_id,
+            customer_id=customer_id,
+            restaurant_id=restaurant_id,
+            delivery_address=delivery_address,
+            delivery_fee=delivery_fee,
+            note=note,
+        )
+        order._lines = list(lines)
+        order._status = status
+        return order
+
     # 實體：靠編號認人，不看內容
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Order) and other.order_id == self.order_id
