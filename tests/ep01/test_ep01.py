@@ -57,7 +57,10 @@ def test_glossary_names_the_order_in_each_context():
 def test_boundaries_hold():
     result = lint_imports(ROOT)
     assert result.returncode == 0, result.stdout
-    assert "Contracts: 2 kept, 0 broken." in result.stdout
+    # 只認這兩條規則的名字，之後的集數加新規則時不用改這裡
+    assert "四個上下文彼此獨立 KEPT" in result.stdout
+    assert "共用核心不認識任何上下文 KEPT" in result.stdout
+    assert " kept, 0 broken." in result.stdout
 
 
 def test_crossing_a_boundary_is_caught(tmp_path):
