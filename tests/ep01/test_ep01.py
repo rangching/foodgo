@@ -41,7 +41,11 @@ def test_events_are_immutable_facts(context):
         name for name, obj in vars(module).items()
         if isinstance(obj, type) and issubclass(obj, DomainEvent) and obj is not DomainEvent
     }
-    assert found == EVENTS[context]
+    # Event Storming 的 11 個事件一個都不能少；之後的集數可以再加（例如第 5 集事件溯源要的），但要寫進詞彙表
+    assert EVENTS[context] <= found
+    glossary = (ROOT / "glossary.md").read_text(encoding="utf-8")
+    for name in sorted(found - EVENTS[context]):
+        assert f"`{name}`" in glossary, f"新事件 {name} 要寫進 glossary.md"
     for name in found:
         cls = getattr(module, name)
         assert dataclasses.is_dataclass(cls) and cls.__dataclass_params__.frozen, f"{name} 要是 frozen dataclass"
