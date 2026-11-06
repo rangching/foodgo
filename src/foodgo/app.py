@@ -13,8 +13,8 @@ from foodgo.kitchen import api as kitchen_api
 from foodgo.kitchen import postgres as kitchen_postgres
 from foodgo.kitchen.service import Kitchen
 from foodgo.ordering import api as ordering_api
+from foodgo.ordering import event_sourcing as ordering_event_sourcing
 from foodgo.ordering import integration as ordering_integration
-from foodgo.ordering import postgres as ordering_postgres
 from foodgo.ordering.repository import InMemoryOrderRepository, OrderRepository
 from foodgo.shared.bus import EventBus
 from foodgo.shared.events import DomainEvent
@@ -44,7 +44,7 @@ def create_app(
             on_startup()
         yield
 
-    app = FastAPI(title="好食快送 FoodGo", version="0.5.0", lifespan=lifespan)
+    app = FastAPI(title="好食快送 FoodGo", version="0.6.0", lifespan=lifespan)
     app.include_router(ordering_api.build_router(orders))
     app.include_router(kitchen_api.build_router(kitchen))
 
@@ -59,12 +59,15 @@ def create_app(
 
 
 def create_postgres_app(url: str | None = None) -> FastAPI:
-    """第 4 集起：訂單、廚房單存 PostgreSQL。事件寫進 outbox，由 relay 送到 Kafka，廚房 consumer 另外跑。"""
+    """第 4 集起：訂單、廚房單存 PostgreSQL。事件寫進 outbox，由 relay 送到 Kafka，廚房 consumer 另外跑。
+
+    第 6 集起訂單改成事件溯源：存在 events 表，要用的時候 fold 回來（第 4 集的 orders 表不再用）。
+    """
     url = url or config.database_url()
     return create_app(
-        orders=ordering_postgres.PostgresOrderRepository(url),
+        orders=ordering_event_sourcing.EventSourcedOrderRepository(url),
         kitchen=Kitchen(tickets=kitchen_postgres.PostgresTicketRepository(url)),
-        on_startup=lambda: db.create_tables(url, *ordering_postgres.SCHEMAS, *kitchen_postgres.SCHEMAS),
+        on_startup=lambda: db.create_tables(url, *ordering_event_sourcing.SCHEMAS, *kitchen_postgres.SCHEMAS),
     )
 
 

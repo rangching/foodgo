@@ -77,3 +77,22 @@ uv run python demos/ep05_history.py fold     # 只看其中一段：crud／event
 ```
 
 `foodgo.ordering.fold` 的 `evolve()`／`fold()` 從事件算出訂單狀態與版本號；`foodgo.shared.event_store` 是記憶體版的事件儲存（`expected_version` 對不上就丟 `ConcurrencyConflict`）。第 6 集換成 PostgreSQL。
+
+## 事件溯源上 PostgreSQL（第 6 集）
+
+第 6 集起 API 的訂單存在 `events` 表（只往後加），要用的時候 fold 回來；第 4 集的 `orders` 表不再寫。
+第 4、5 集練習時留下的訂單不會搬過來，想從 A001 重新開始：`docker compose down -v && docker compose up -d`。
+
+```bash
+uv run python demos/ep06_event_store.py          # events 表、重播、兩個連線同時寫、快照、時光機（資料庫 foodgo_demo）
+uv run python demos/ep06_event_store.py race     # 只看其中一段：events／replay／race／snapshot／asof
+```
+
+| 網址 | 看什麼 |
+|---|---|
+| <http://127.0.0.1:8000/orders/A001/events> | A001 的每一個事件：版本、名稱、時間、內容 |
+| `http://127.0.0.1:8000/orders/A001?as_of=2026-11-06T15:00:00` | 時光機：那個時間點的 A001（沒寫時區就當臺北時間） |
+
+看 events 表：`docker compose exec -e PGTZ=Asia/Taipei postgres psql -U foodgo -c 'SELECT position, stream_id, version, type, occurred_at FROM events;'`
+（示範腳本的資料在另一個資料庫：`psql -U foodgo -d foodgo_demo`）。
+有人比你先改了同一張訂單，API 回 409：重新讀取，再決定要不要做。

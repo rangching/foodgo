@@ -9,7 +9,7 @@ import time
 
 from foodgo import contracts
 from foodgo.infra import config, db, kafka, outbox
-from foodgo.ordering.postgres import SCHEMAS
+from foodgo.ordering.event_sourcing import SCHEMAS
 
 
 def main() -> None:

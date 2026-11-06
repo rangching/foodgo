@@ -1,9 +1,13 @@
 """點餐的領域模型：規則寫在這裡，不寫在 API 裡。"""
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
-from foodgo.ordering.events import OrderCancelled, OrderPlaced
+from foodgo.ordering.events import ItemAdded, OrderCancelled, OrderDrafted, OrderPlaced
 from foodgo.shared.events import DomainEvent
+
+if TYPE_CHECKING:  # 只給型別檢查看：fold.py 也 import 這個檔
+    from foodgo.ordering.fold import OrderState
 
 
 # ---------------------------------------------------------------- 值物件
@@ -90,31 +94,33 @@ class Order:
         self._lines: list[OrderLine] = []
         self._status = OrderStatus.DRAFT
         self._events: list[DomainEvent] = []
+        self._version = 0  # 套用了幾個事件（含還沒存的）：和 OrderState.version 同一個意思
+        self._record(
+            OrderDrafted(
+                order_id=order_id,
+                customer_id=customer_id,
+                restaurant_id=restaurant_id,
+                delivery_address=delivery_address,
+                delivery_fee=delivery_fee,
+                note=note,
+            )
+        )
 
     @classmethod
-    def restore(
-        cls,
-        *,
-        order_id: str,
-        customer_id: str,
-        restaurant_id: str,
-        delivery_address: Address,
-        delivery_fee: Money,
-        note: str,
-        lines: list[OrderLine],
-        status: OrderStatus,
-    ) -> "Order":
-        """給 Repository 用：照存下來的樣子把訂單擺回來。不檢查規則、不記事件——事情早就發生過了。"""
+    def from_state(cls, state: "OrderState") -> "Order":
+        """給 Repository 用：把 fold(events) 算出來的狀態擺回聚合。不檢查規則、不記事件——事情早就發生過了。"""
         order = cls(
-            order_id=order_id,
-            customer_id=customer_id,
-            restaurant_id=restaurant_id,
-            delivery_address=delivery_address,
-            delivery_fee=delivery_fee,
-            note=note,
+            order_id=state.order_id,
+            customer_id=state.customer_id,
+            restaurant_id=state.restaurant_id,
+            delivery_address=state.delivery_address,
+            delivery_fee=state.delivery_fee,
+            note=state.note,
         )
-        order._lines = list(lines)
-        order._status = status
+        order._lines = list(state.lines)
+        order._status = state.status
+        order._version = state.version
+        order._events = []  # 建構時記下的 OrderDrafted 不算：它早就在事件流裡了
         return order
 
     # 實體：靠編號認人，不看內容
@@ -127,6 +133,11 @@ class Order:
     @property
     def status(self) -> OrderStatus:
         return self._status
+
+    @property
+    def version(self) -> int:
+        """第幾版：套用了幾個事件。存的時候用「版本 − 還沒存的事件數」當 expected_version。"""
+        return self._version
 
     @property
     def lines(self) -> tuple[OrderLine, ...]:
@@ -144,6 +155,7 @@ class Order:
         if self._status is not OrderStatus.DRAFT:
             raise OrderRuleViolation("訂單送出後不能再改品項")
         self._lines.append(OrderLine(name, unit_price, quantity))
+        self._record(ItemAdded(order_id=self.order_id, name=name, unit_price=unit_price, quantity=quantity))
 
     def place(self) -> None:
         if self._status is not OrderStatus.DRAFT:
@@ -151,7 +163,7 @@ class Order:
         if not self._lines:
             raise OrderRuleViolation("訂單至少要有一個品項")
         self._status = OrderStatus.PLACED
-        self._events.append(
+        self._record(
             OrderPlaced(
                 order_id=self.order_id,
                 customer_id=self.customer_id,
@@ -169,9 +181,13 @@ class Order:
         if not reason.strip():
             raise OrderRuleViolation("取消要寫理由")
         self._status = OrderStatus.CANCELLED
-        self._events.append(OrderCancelled(order_id=self.order_id, reason=reason))
+        self._record(OrderCancelled(order_id=self.order_id, reason=reason))
 
-    # 領域事件：聚合先記下來，由外面（API、之後的事件匯流排）一次取走
+    # 領域事件：聚合先記下來，由外面（Repository）一次取走
+    def _record(self, event: DomainEvent) -> None:
+        self._events.append(event)
+        self._version += 1
+
     def pull_events(self) -> list[DomainEvent]:
         events, self._events = self._events, []
         return events

@@ -59,3 +59,15 @@ forbidden_modules =
     foodgo.contracts
     foodgo.shared
     foodgo.app
+
+[importlinter:contract:domain]
+name = 點餐的領域模型不碰基礎設施
+type = forbidden
+source_modules =
+    foodgo.ordering.model
+    foodgo.ordering.events
+    foodgo.ordering.fold
+    foodgo.ordering.codec
+forbidden_modules =
+    foodgo.infra
+    foodgo.contracts

@@ -68,6 +68,8 @@
 
 | 方法 | 成功後記下的事件 |
 |---|---|
+| `Order(...)` | `OrderDrafted`（訂單草稿已建立；第 6 集起） |
+| `Order.add_line()` | `ItemAdded`（品項已加入；第 6 集起） |
 | `Order.place()` | `OrderPlaced`（訂單已送出） |
 | `Order.cancel(reason)` | `OrderCancelled`（訂單已取消） |
 
@@ -81,6 +83,7 @@
 | 請求格式不對（例如數量 0、少欄位） | 422（FastAPI 自動檢查） |
 | 送出時違反不變條件（例如空訂單） | 422（模型擋下，API 照實回報） |
 | 對既有訂單做不允許的事（例如取消兩次） | 409 |
+| 讀完到寫之間有人先改了這張訂單（`ConcurrencyConflict`，第 6 集） | 409 |
 | 找不到訂單 | 404 |
 
 ## 事件驅動（第 3 集：從呼叫到通知）
@@ -288,3 +291,45 @@ Order 的每個動作對應一個事件，照順序套上去就能算回整張�
 | 報表、看板 | 讀模型（第 9 集） | 從事件投影出來的表，壞了就砍掉重建 |
 
 判斷的問題：要不要回答「當時是什麼樣子、怎麼變成這樣」？會不會有人同時改同一筆？事件本身是不是業務上的事實？三個都是「否」，CRUD 就好。
+
+## 事件溯源上 PostgreSQL（第 6 集：重播、快照、時光機）
+
+### 存的地方：`events` 表與 `snapshots` 表
+
+| 欄位 | 意思 |
+|---|---|
+| `position` | `bigserial`：所有事件流排在同一條線上的第幾個（第 9 集投影照這個順序讀） |
+| `stream_id`、`version` | 哪一條事件流（訂單編號）、第幾個事件；`UNIQUE (stream_id, version)`：同一條流不會有兩個第 5 版 |
+| `event_id` | 事件自己的編號（`UNIQUE`）；整合事件沿用它，廚房用它判重 |
+| `type`、`data` | 事件名稱與內容（`jsonb`）。基礎設施只認這兩個，不認識事件類別 |
+| `occurred_at` | 事件發生的時間：時光機照這個查 |
+
+`events` 表**只能往後加**：`UPDATE`、`DELETE`、`TRUNCATE` 都由資料庫的觸發器擋下來（「事件只能往後加，不能改、不能刪」）。寫錯了就再加一個更正的事件。
+
+`snapshots` 表（`stream_id`、`version`、`state jsonb`）放某一版的狀態。快照只是捷徑：刪掉了照樣能從事件算回來；`OrderState` 改了欄位，舊快照刪掉重建就好，事件才是真相。
+
+### 誰負責什麼
+
+| 層 | 程式 | 做什麼 |
+|---|---|---|
+| 基礎設施 | `foodgo.infra.event_store` | SQL：`append`（比對版本、寫入）、`read`（照版本讀，可以接在快照後面、可以只讀某個時間以前）、`save_snapshot`、`latest_snapshot`。只認 type＋data，版本對不上丟自己的 `VersionConflict` |
+| 點餐 | `foodgo.ordering.codec` | 事件 ↔ `(type, data)`、狀態 ↔ 快照 JSON：`Money` 攤成整數元、`Address` 攤成字串。純函式；認不得的 type 丟 `TypeError` |
+| 點餐 | `PostgresEventStore`（`foodgo.ordering.event_sourcing`） | 第 5 集 `InMemoryEventStore` 的 PostgreSQL 版，介面一樣；把 `VersionConflict` 翻成第 5 集的 `ConcurrencyConflict` |
+| 點餐 | `EventSourcedOrderRepository` | 第 2 集的 `OrderRepository`（`next_id`／`get`／`save`），存的是事件；多了 `load`、`take_snapshot`、`load_as_of`、`history` |
+
+第 5 條邊界規則「基礎設施不認識任何上下文」照樣守著；第 6 條「點餐的領域模型不碰基礎設施」：`model`、`events`、`fold`、`codec` 不能 import `foodgo.infra`、`foodgo.contracts`。
+
+### 詞
+
+| 詞 | 程式名稱 | 意思 |
+|---|---|---|
+| 重播 replay | `fold(store.load("A001"))` | 照版本順序讀出一條流的事件，一個一個 `evolve` 回現在的狀態 |
+| 從狀態擺回聚合 | `Order.from_state(state)` | 取代第 4 集的 `Order.restore()`：Repository 先 `fold` 出 `OrderState`，再擺回 `Order`；不檢查規則、不記事件 |
+| 訂單的版本 | `Order.version` | 套用了幾個事件（含還沒存的）。存的時候 `expected_version = 版本 − 還沒存的事件數` |
+| 存訂單 | `EventSourcedOrderRepository.save(order)` | 一個交易：新事件 `append` 到 `events`，要公告的（`OrderPlaced`）寫進 `outbox`。一起成功、一起失敗 |
+| 併發衝突 | `ConcurrencyConflict` → HTTP 409 | 讀完到寫之間有人先寫了。兩個連線同時寫第 5 版時，後寫的那個會在 `UNIQUE` 索引上等先寫的交易結束，再被擋下。API 回 409，請呼叫的人重新讀取、再決定（不自動重試：重讀之後規則可能已經不讓你做了） |
+| 快照 snapshot | `take_snapshot(order_id)`、`load(order_id)` | 把某一版的狀態存起來；載入時從最新的快照接著 `fold(後面的事件, 快照)`。`Loaded.events_read` 看得到讀了幾個事件 |
+| 時光機 | `load_as_of(order_id, when)`、`GET /orders/{id}?as_of=…` | 只 `fold` 那個時間點以前發生的事件（`occurred_at <= when`）。時間要帶時區；API 沒寫時區就當臺北時間。時光機不用快照，一律從頭算 |
+| 事件歷史 | `history(order_id)`、`GET /orders/{id}/events` | 一張訂單的每一個事件：版本、名稱、時間、內容 |
+
+記憶體版的 `InMemoryOrderRepository` 只記現在的樣子：`as_of` 與 `/events` 回 501。

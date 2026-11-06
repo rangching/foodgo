@@ -1,9 +1,13 @@
-"""訂單存在 PostgreSQL。存訂單時，要對外公告的事件寫進 outbox——同一個交易，一起成功、一起失敗。"""
+"""訂單存在 PostgreSQL。存訂單時，要對外公告的事件寫進 outbox——同一個交易，一起成功、一起失敗。
+
+第 4 集的 CRUD 版：一張訂單一列。第 6 集起 API 改用事件溯源版（event_sourcing.py），這一版留給第 4、5 集對照。
+"""
 import psycopg
 from psycopg.types.json import Jsonb
 
 from foodgo import contracts
 from foodgo.infra import outbox
+from foodgo.ordering.fold import OrderState
 from foodgo.ordering.integration import to_integration
 from foodgo.ordering.model import Address, Money, Order, OrderLine, OrderStatus
 
@@ -51,16 +55,17 @@ class PostgresOrderRepository:
         if row is None:
             return None
         customer_id, restaurant_id, street, fee, note, status, lines = row
-        return Order.restore(
+        state = OrderState(  # CRUD 的狀態是讀出來的一列；事件溯源版是 fold 算出來的
             order_id=order_id,
             customer_id=customer_id,
             restaurant_id=restaurant_id,
             delivery_address=Address(street),
             delivery_fee=Money(fee),
             note=note,
-            lines=[OrderLine(line["name"], Money(line["unit_price"]), line["quantity"]) for line in lines],
+            lines=tuple(OrderLine(line["name"], Money(line["unit_price"]), line["quantity"]) for line in lines),
             status=OrderStatus(status),
-        )
+        )  # orders 表不記版本：CRUD 用不到（version 留預設值）
+        return Order.from_state(state)
 
     def save(self, order: Order) -> None:
         messages = [m for m in map(to_integration, order.pull_events()) if m is not None]  # OrderCancelled 不公告

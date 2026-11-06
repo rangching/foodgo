@@ -147,17 +147,8 @@ def folding() -> None:
 
 # ---------------------------------------------------------------- 4. 樂觀併發：兩個人同時寫
 def to_order(state: OrderState) -> Order:
-    """把算出來的狀態擺回 Order，才能用它的規則判斷能不能取消。第 6 集把這件事搬進 Repository。"""
-    return Order.restore(
-        order_id=state.order_id,
-        customer_id=state.customer_id,
-        restaurant_id=state.restaurant_id,
-        delivery_address=state.delivery_address,
-        delivery_fee=state.delivery_fee,
-        note=state.note,
-        lines=list(state.lines),
-        status=state.status,
-    )
+    """把算出來的狀態擺回 Order，才能用它的規則判斷能不能取消。第 6 集起 Repository 也這樣做（Order.from_state）。"""
+    return Order.from_state(state)
 
 
 def race() -> None:

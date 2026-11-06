@@ -1,9 +1,17 @@
 """點餐的 HTTP 入口：把請求翻成模型的方法呼叫，再把結果翻回 HTTP。規則不寫在這裡。"""
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from foodgo.ordering import codec
+from foodgo.ordering.fold import OrderState
 from foodgo.ordering.model import Address, Money, Order, OrderRuleViolation
-from foodgo.ordering.repository import OrderRepository
+from foodgo.ordering.repository import OrderHistory, OrderRepository
+from foodgo.shared.event_store import ConcurrencyConflict
+
+TAIPEI = timezone(timedelta(hours=8))
 
 
 class LineIn(BaseModel):
@@ -53,6 +61,7 @@ class LineOut(BaseModel):
 class OrderOut(BaseModel):
     order_id: str
     status: str
+    version: int  # 第幾版：套用了幾個事件（第 6 集）
     customer_id: str
     restaurant_id: str
     lines: list[LineOut]
@@ -63,10 +72,12 @@ class OrderOut(BaseModel):
     delivery_address: str
 
     @classmethod
-    def of(cls, order: Order) -> "OrderOut":
+    def of(cls, order: Order | OrderState) -> "OrderOut":
+        """Order（現在的訂單）或 OrderState（時光機算出來的那一刻）都可以。"""
         return cls(
             order_id=order.order_id,
             status=order.status,
+            version=order.version,
             customer_id=order.customer_id,
             restaurant_id=order.restaurant_id,
             lines=[
@@ -78,12 +89,19 @@ class OrderOut(BaseModel):
                 )
                 for line in order.lines
             ],
-            subtotal=order.subtotal.amount,
+            subtotal=sum(line.subtotal.amount for line in order.lines),
             delivery_fee=order.delivery_fee.amount,
             total=order.total.amount,
             note=order.note,
             delivery_address=order.delivery_address.street,
         )
+
+
+class EventOut(BaseModel):
+    version: int
+    type: str
+    occurred_at: datetime
+    data: dict[str, Any]
 
 
 def build_router(orders: OrderRepository) -> APIRouter:
@@ -94,6 +112,17 @@ def build_router(orders: OrderRepository) -> APIRouter:
         if order is None:
             raise HTTPException(404, f"找不到訂單 {order_id}")
         return order
+
+    def save(order: Order) -> None:
+        try:
+            orders.save(order)  # 存訂單，事件也一起交出去
+        except ConcurrencyConflict as e:
+            raise HTTPException(409, str(e))  # 讀完到寫之間有人先改了：重新讀取、再決定要不要做
+
+    def history() -> OrderHistory:
+        if not isinstance(orders, OrderHistory):
+            raise HTTPException(501, "這個 Repository 只記現在的樣子，沒有事件可以查（第 6 集起 PostgreSQL 版才有）")
+        return orders
 
     @router.post("", status_code=201, summary="送出訂單")
     def place_order(body: PlaceOrderIn) -> OrderOut:
@@ -111,12 +140,34 @@ def build_router(orders: OrderRepository) -> APIRouter:
             order.place()
         except OrderRuleViolation as e:
             raise HTTPException(422, str(e))  # 這張訂單本身不成立
-        orders.save(order)  # 存訂單，事件也一起交出去
+        save(order)
         return OrderOut.of(order)
 
-    @router.get("/{order_id}", summary="查一張訂單")
-    def get_order(order_id: str) -> OrderOut:
-        return OrderOut.of(find(order_id))
+    @router.get("/{order_id}", summary="查一張訂單（as_of：那個時間點的樣子）")
+    def get_order(order_id: str, as_of: datetime | None = None) -> OrderOut:
+        if as_of is None:
+            return OrderOut.of(find(order_id))
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=TAIPEI)  # 沒寫時區就當臺北時間
+        state = history().load_as_of(order_id, as_of)
+        if state is None:
+            raise HTTPException(404, f"{as_of:%Y-%m-%d %H:%M:%S%z} 時還沒有訂單 {order_id}")
+        return OrderOut.of(state)
+
+    @router.get("/{order_id}/events", summary="這張訂單發生過的每一件事")
+    def get_events(order_id: str) -> list[EventOut]:
+        records = history().history(order_id)
+        if not records:
+            raise HTTPException(404, f"找不到訂單 {order_id}")
+        return [
+            EventOut(
+                version=r.version,
+                type=r.type,
+                occurred_at=r.occurred_at.astimezone(TAIPEI),
+                data=codec.to_data(r.event)[1],
+            )
+            for r in records
+        ]
 
     @router.post("/{order_id}/cancel", summary="取消訂單")
     def cancel_order(order_id: str, body: CancelIn) -> OrderOut:
@@ -125,7 +176,7 @@ def build_router(orders: OrderRepository) -> APIRouter:
             order.cancel(body.reason)
         except OrderRuleViolation as e:
             raise HTTPException(409, str(e))  # 和訂單目前的狀態衝突
-        orders.save(order)
+        save(order)
         return OrderOut.of(order)
 
     return router

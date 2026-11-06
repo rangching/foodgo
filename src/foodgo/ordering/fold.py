@@ -52,6 +52,9 @@ def evolve(state: OrderState | None, event: DomainEvent) -> OrderState:
     return replace(state, version=state.version + 1)
 
 
-def fold(events: Iterable[DomainEvent]) -> OrderState | None:
-    """從第一個事件套到最後一個。一個事件都沒有，就是沒有這張訂單（None）。"""
-    return reduce(evolve, events, None)
+def fold(events: Iterable[DomainEvent], state: OrderState | None = None) -> OrderState | None:
+    """從第一個事件套到最後一個。一個事件都沒有，就是沒有這張訂單（None）。
+
+    給了 state（例如第 6 集的快照），就從它接著套：fold(後面的事件, 快照) 和從頭算一樣。
+    """
+    return reduce(evolve, events, state)
