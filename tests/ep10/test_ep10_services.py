@@ -261,7 +261,8 @@ def compose() -> dict:
 
 
 def test_jaeger_joins_the_compose(compose):
-    assert set(compose) == {"kafka", "kafka-ui", "postgres", "jaeger"}
+    # 第 11 集起多了 FoodGo 自己的五個容器（tests/ep11 檢查）：這裡只要求基礎設施的四個都在
+    assert {"kafka", "kafka-ui", "postgres", "jaeger"} <= set(compose)
     image, tag = compose["jaeger"]["image"].rsplit(":", 1)
     assert image == "jaegertracing/jaeger"  # Jaeger v2（all-in-one 是 v1 的名字）
     assert re.fullmatch(r"2\.\d+\.\d+", tag), f"要釘到明確版本：{tag}"

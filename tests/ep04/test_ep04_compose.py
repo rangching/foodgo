@@ -32,6 +32,8 @@ def test_images_are_pinned(services):
 
 def test_every_service_has_a_healthcheck(services):
     for name, service in services.items():
+        if "build" in service:  # 第 11 集起 FoodGo 自己的容器：健康檢查寫在 Dockerfile 的 HEALTHCHECK（tests/ep11 檢查）
+            continue
         assert service["healthcheck"]["test"], f"{name} 沒有健康檢查"
 
 
