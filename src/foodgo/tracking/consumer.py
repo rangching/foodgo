@@ -7,6 +7,7 @@
 從哪裡讀起看 projection_positions（和 order_tracking 同一個資料庫、同一個交易），不看 Kafka 記的位置。
 """
 import json
+import threading
 from collections.abc import Sequence
 
 from confluent_kafka import Message
@@ -46,6 +47,7 @@ def run(
     listens: Sequence[str] = LISTENS,
     group: str = GROUP,
     stop_when_idle: float | None = None,
+    stop: threading.Event | None = None,  # 第 10 集：服務要關了，設起來就停
 ) -> None:
     """收訊息、投影。分到 partition 時，從 projection_positions 記的下一則讀起（沒有記就從頭）。"""
     kafka.consume(
@@ -53,7 +55,7 @@ def run(
         group,
         lambda message: handle(tracking, message),
         start_at=tracking.start_at,
-        stop_when_idle=stop_when_idle,
+        stop_when_idle=stop_when_idle, stop=stop,
     )
 
 

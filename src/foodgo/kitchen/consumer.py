@@ -11,6 +11,7 @@ FOODGO_FAULT_KITCHEN=slow：每一則 AcceptTicket 都想 FOODGO_KITCHEN_SLOW_SE
 """
 import json
 import os
+import threading
 from collections.abc import Sequence
 
 from confluent_kafka import Message
@@ -50,6 +51,7 @@ def run(
     listens: Sequence[str] = LISTENS,
     group: str = GROUP,
     stop_when_idle: float | None = None,
+    stop: threading.Event | None = None,  # 第 10 集：服務要關了，設起來就停
 ) -> None:
     """收訊息；每處理完一則（和每次閒下來）就把 kitchen_outbox 裡還沒送的送到 Kafka。"""
     sender = kafka.KafkaSender()
@@ -62,7 +64,7 @@ def run(
         relay()
 
     relay()  # 上次當掉前還沒送的，先送
-    kafka.consume(listens, group, handle_then_relay, on_idle=relay, stop_when_idle=stop_when_idle)
+    kafka.consume(listens, group, handle_then_relay, on_idle=relay, stop_when_idle=stop_when_idle, stop=stop)
 
 
 def main() -> None:

@@ -1,4 +1,5 @@
 """Kafka 的薄薄一層（confluent-kafka）：建 topic、送訊息、以 consumer group 收訊息。"""
+import threading
 from collections.abc import Callable, Sequence
 
 from confluent_kafka import (
@@ -12,7 +13,7 @@ from confluent_kafka import (
 )
 from confluent_kafka.admin import AdminClient, NewTopic
 
-from foodgo.infra import config
+from foodgo.infra import config, telemetry
 
 
 def ensure_topic(topic: str, *, partitions: int = 3, bootstrap: str | None = None) -> None:
@@ -70,6 +71,7 @@ def consume(
     bootstrap: str | None = None,
     stop_when_idle: float | None = None,
     on_idle: Callable[[], None] | None = None,
+    stop: threading.Event | None = None,
     start_at: Callable[[str, int], int | None] | None = None,
 ) -> None:
     """以 consumer group 的身分收訊息：處理完一則，才提交那一則的位置（offset）。
@@ -80,6 +82,8 @@ def consume(
     on_idle：一秒沒有新訊息就呼叫一次（第 7 集：順便把自己 outbox 裡還沒送的送出去）。
     start_at（第 9 集）：分到 partition 時問一次「這個 partition 處理到第幾則」（記在自己的資料庫裡），
       從下一則讀起；回 None 就從頭讀。這時 Kafka 記的位置只拿來看 lag，不拿來決定從哪裡讀。
+    stop（第 10 集）：服務要關了——設起來之後，處理完手上這一則就離開 consumer group（服務裡的背景工作用）。
+    每一則訊息一個 process span（第 10 集）：從 Kafka header 的 traceparent 接續上一段。
     """
     consumer = Consumer(
         {
@@ -104,7 +108,7 @@ def consume(
     consumer.subscribe([topics] if isinstance(topics, str) else list(topics), on_assign=on_assign)
     idle = 0.0
     try:
-        while True:
+        while stop is None or not stop.is_set():
             message = consumer.poll(1.0)
             if message is None:
                 if on_idle is not None:
@@ -116,7 +120,8 @@ def consume(
             idle = 0.0
             if message.error():
                 raise KafkaException(message.error())
-            handle(message)  # 出錯就讓它當掉：位置沒提交，重啟後會再收到這一則
+            with telemetry.consuming(message, group):  # 第 10 集：接續 trace
+                handle(message)  # 出錯就讓它當掉：位置沒提交，重啟後會再收到這一則
             consumer.commit(message=message, asynchronous=False)  # 處理完才提交
     finally:
         consumer.close()  # 離開 consumer group，partition 馬上交給別人

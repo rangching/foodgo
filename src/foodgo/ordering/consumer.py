@@ -7,6 +7,7 @@
 點餐也只是編排器的一個參與者：和付款、廚房、外送一樣，收命令、做自己的事、公告結果。
 """
 import json
+import threading
 from collections.abc import Sequence
 
 from confluent_kafka import Message
@@ -64,6 +65,7 @@ def run(
     listens: Sequence[str] = LISTENS,
     group: str = GROUP,
     stop_when_idle: float | None = None,
+    stop: threading.Event | None = None,  # 第 10 集：服務要關了，設起來就停
 ) -> None:
     """收命令；每處理完一則（和每次閒下來）就把 outbox 裡還沒送的送到 Kafka（和 relay 程序一起送也不會重複）。"""
     sender = kafka.KafkaSender()
@@ -75,7 +77,7 @@ def run(
         handle(orders, message)
         relay()
 
-    kafka.consume(listens, group, handle_then_relay, on_idle=relay, stop_when_idle=stop_when_idle)
+    kafka.consume(listens, group, handle_then_relay, on_idle=relay, stop_when_idle=stop_when_idle, stop=stop)
 
 
 def main() -> None:

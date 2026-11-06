@@ -140,3 +140,69 @@ source_modules =
     foodgo.saga
 forbidden_modules =
     foodgo.tracking
+
+[importlinter:contract:ordering-service]
+name = 點餐服務只組裝點餐、編排器與讀取端
+type = forbidden
+source_modules =
+    foodgo.services.ordering
+forbidden_modules =
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.app
+
+[importlinter:contract:payment-service]
+name = 付款服務只組裝付款
+type = forbidden
+source_modules =
+    foodgo.services.payment
+forbidden_modules =
+    foodgo.ordering
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.saga
+    foodgo.tracking
+    foodgo.app
+
+[importlinter:contract:kitchen-service]
+name = 廚房服務只組裝廚房
+type = forbidden
+source_modules =
+    foodgo.services.kitchen
+forbidden_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.delivery
+    foodgo.saga
+    foodgo.tracking
+    foodgo.app
+
+[importlinter:contract:delivery-service]
+name = 外送服務只組裝外送
+type = forbidden
+source_modules =
+    foodgo.services.delivery
+forbidden_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.saga
+    foodgo.tracking
+    foodgo.app
+
+[importlinter:contract:gateway]
+name = Gateway 只認得網址
+type = forbidden
+source_modules =
+    foodgo.services.gateway
+forbidden_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.shared
+    foodgo.contracts
+    foodgo.saga
+    foodgo.tracking
+    foodgo.app

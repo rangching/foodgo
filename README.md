@@ -233,3 +233,43 @@ uv run python -m foodgo.tracking.rebuild      # 清表＋忘記讀到哪（一�
 ```
 
 Kafka 和資料庫要一起清（`docker compose down -v`）：只清一邊的話，`projection_positions` 記的位置會對不上 topic。
+
+## 依邊界拆服務：五個程序與 Jaeger（第 10 集）
+
+第 10 集起 FoodGo 拆成五個程序（`foodgo.services`）：對外只有 Gateway（:8000），後面四個服務各有自己的資料庫；服務之間只透過 Kafka。`compose.yaml` 多了 Jaeger（`jaegertracing/jaeger:2.23.0`），一張訂單走過的每一段都串成一條 trace。
+
+| 程序 | 啟動 | 埠 | 資料庫 |
+|---|---|---|---|
+| Gateway | `uv run python -m foodgo.services.gateway` | 8000 | 無 |
+| 點餐服務（＋編排器、讀取端） | `uv run python -m foodgo.services.ordering` | 8101 | `foodgo_ordering` |
+| 付款服務 | `uv run python -m foodgo.services.payment` | 8102 | `foodgo_payment` |
+| 廚房服務 | `uv run python -m foodgo.services.kitchen` | 8103 | `foodgo_kitchen` |
+| 外送服務 | `uv run python -m foodgo.services.delivery` | 8104 | `foodgo_delivery` |
+
+一條指令起五個程序（第 9 集自己開著的 consumer、`fastapi dev` 先停掉：consumer group 名字一樣，會互相搶訊息）：
+
+```bash
+uv run python demos/ep10_services.py up        # 只起五個程序、印每個程序的紀錄（Ctrl-C 全部停）
+uv run python demos/ep10_services.py           # 起五個程序 → 從 Gateway 下單 → 查追蹤到走完 → 印出 Jaeger 上的整條 trace
+uv run python demos/ep10_services.py reject    # 餐廳拒單 → 退款 → 取消：還是同一條 trace
+uv run python demos/ep10_services.py decline   # 付款失敗 → 取消
+uv run python demos/ep10_services.py trace <trace_id>
+```
+
+| 網址 | 看什麼 |
+|---|---|
+| <http://127.0.0.1:8000/services> | Gateway 問後面四個服務的 `/healthz` |
+| <http://127.0.0.1:8000/track/A001> | 追蹤頁（經過 Gateway 轉給點餐服務） |
+| <http://127.0.0.1:16686/search?service=gateway&operation=POST%20%2Forders> | Jaeger UI：Service `gateway`、Span Name `POST /orders` → Find Traces；或右上角貼上回應 header 的 `X-Trace-ID`。Attributes 可以搜 `foodgo.order_id=A001` |
+| <http://127.0.0.1:18080/ui/clusters/foodgo/all-topics/ordering.events/messages> | 每則訊息的 Headers 多了 `traceparent`、`correlation_id` |
+
+看每個服務自己的資料庫：
+
+```bash
+docker compose exec postgres psql -U foodgo -c '\l foodgo*'
+docker compose exec postgres psql -U foodgo -d foodgo_payment -c '\dt'
+docker compose exec postgres psql -U foodgo -d foodgo_ordering -c "SELECT type, headers FROM outbox ORDER BY id LIMIT 3;"
+```
+
+第 4～9 集的單一程序（`uv run fastapi dev`、`python -m foodgo.kitchen.consumer`…）照樣能跑，用的是資料庫 `foodgo`；和第 10 集的服務用同一組 topic 與 consumer group 名字，**不要同時開**（換之前 `docker compose down -v`）。
+埠號被占用：服務的埠用 `FOODGO_GATEWAY_PORT`、`FOODGO_ORDERING_PORT`…改；Jaeger 用 `.env` 的 `FOODGO_JAEGER_UI_PORT`、`FOODGO_OTLP_PORT`。

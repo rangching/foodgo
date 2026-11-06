@@ -7,6 +7,7 @@
 第 9 集起也發 saga.events：放棄、轉人工處理時的 SagaEscalated。
 FOODGO_SAGA_TIMEOUT＝等回覆幾秒（預設 3）；FOODGO_SAGA_RETRIES＝逾時或退款失敗後再送幾次（預設 1）。
 """
+import threading
 from collections.abc import Sequence
 
 from confluent_kafka import Message
@@ -33,6 +34,7 @@ def run(
     listens: Sequence[str] = LISTENS,
     group: str = GROUP,
     stop_when_idle: float | None = None,
+    stop: threading.Event | None = None,  # 第 10 集：服務要關了，設起來就停
 ) -> None:
     """收訊息；每處理完一則、每閒下來一秒：看逾時，再把 saga_outbox 裡的命令送出去。"""
     sender = kafka.KafkaSender()
@@ -46,7 +48,7 @@ def run(
         tick_then_relay()
 
     tick_then_relay()  # 停機的時候到期的，先處理
-    kafka.consume(listens, group, handle_then_relay, on_idle=tick_then_relay, stop_when_idle=stop_when_idle)
+    kafka.consume(listens, group, handle_then_relay, on_idle=tick_then_relay, stop_when_idle=stop_when_idle, stop=stop)
 
 
 def main() -> None:

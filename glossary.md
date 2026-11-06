@@ -759,3 +759,111 @@ uv run python -m foodgo.tracking.rebuild
 4. 再算一次 md5：一樣＝重建出來的資料一模一樣。之後照常起投影 consumer，它從記好的位置接著讀。
 
 能這樣做，靠的是三件事：事件還在（Kafka 的保留時間）、投影是純函式（同樣的事件一定算出同樣的列）、讀模型裡沒有「寫進來的時間」這種每次都不一樣的欄位。讀模型被改壞了、欄位要改、要加一個新畫面——都是砍掉重建。
+
+## 依邊界拆服務（第 10 集：微服務、API Gateway、分散式追蹤）
+
+### 模組化單體與微服務
+
+**模組化單體**（modular monolith）：一個部署單位，裡面照限界上下文分好套件、用規則守住邊界。第 1～9 集的 FoodGo 就是：四個上下文彼此不 import（第 1 條規則），可是共用一個資料庫 `foodgo`、一個 API 程序。
+**微服務**（microservices）：每個上下文自己一個程序、自己一個資料庫，獨立部署、獨立擴展；彼此只透過網路上的共同語言往來。
+
+| | 模組化單體（第 9 集） | 微服務（第 10 集） |
+|---|---|---|
+| 程序 | 8 個：API＋relay＋六個 consumer（同一包程式、同一個資料庫） | 5 個：Gateway＋4 個服務；consumer、relay 變成服務裡的背景工作 |
+| 資料庫 | 一個 `foodgo`：誰都「可以」JOIN 誰的表（只靠紀律不 JOIN） | 每個服務一個：`foodgo_ordering`、`foodgo_payment`、`foodgo_kitchen`、`foodgo_delivery`——想 JOIN 也 JOIN 不到 |
+| 邊界靠什麼守 | import-linter（程式碼） | import-linter＋網路與資料庫的牆 |
+| 部署、擴展 | 一起上線；要擴廚房就整包一起擴 | 各自上線；第 12 集只擴廚房 |
+| 出問題時 | 一個 traceback 看到底 | 一張訂單跨 5 個程序、Kafka 上 10 幾則訊息：要**分散式追蹤**才看得到全貌 |
+| 本機開發 | `uv run fastapi dev` | 起 5 個程序＋Docker（`demos/ep10_services.py`） |
+| 什麼時候選 | 團隊小、邊界還在變：先把邊界畫對，拆是之後的事 | 邊界穩了、各團隊要各自上線、各上下文的負載差很多 |
+
+FoodGo 能拆得這麼順，是因為前九集已經把難的做完了：上下文之間只靠 Kafka 上的共同語言（第 3、4 集）、每個上下文有自己的表與 outbox（第 7 集）、跨服務的流程有編排器（第 8 集）、畫面要的資料有自己的讀模型（第 9 集）。**這一集幾乎沒有改業務程式**：只是把組裝點從一個 `app.py` 拆成五個。
+
+### 五個程序（`foodgo.services`）
+
+| 程序 | 啟動 | 埠 | 資料庫 | 背景工作（第 9 集的程序） | 對外 HTTP | 聽的 topic | 發的 topic |
+|---|---|---|---|---|---|---|---|
+| Gateway | `python -m foodgo.services.gateway` | 8000（對外唯一） | 無 | 無 | 轉發 `/orders*`、`/track/*` → 點餐；`/tickets*` → 廚房；`/healthz`、`/services` | 無 | 無 |
+| 點餐服務 | `python -m foodgo.services.ordering` | 8101 | `foodgo_ordering` | `relay`、`ordering`、`saga`、`tracking` | `/orders`…、`/orders/{id}/tracking`、`/track/{id}` | `ordering.commands`、四條 `*.events`、`saga.events` | `ordering.events`、四條 `*.commands`、`saga.events` |
+| 付款服務 | `python -m foodgo.services.payment` | 8102 | `foodgo_payment` | `payment` | 只有健康檢查 | `payment.commands` | `payment.events` |
+| 廚房服務 | `python -m foodgo.services.kitchen` | 8103 | `foodgo_kitchen` | `kitchen` | `/tickets`、`/tickets/{id}/ready` | `kitchen.commands` | `kitchen.events` |
+| 外送服務 | `python -m foodgo.services.delivery` | 8104 | `foodgo_delivery` | `delivery` | 只有健康檢查 | `delivery.commands` | `delivery.events` |
+
+每個服務都有 **`/healthz`**（活著嗎：每個背景工作都還在跑就 200，有一個當掉就 503）與 **`/readyz`**（可以接客了嗎：啟動做完、連得上自己的資料庫）。環境變數：`FOODGO_DATABASE_URL`（自己的資料庫；沒設就是 compose 那台的 `foodgo_<名字>`）、`FOODGO_KAFKA_BOOTSTRAP`、`FOODGO_<名字>_PORT`、`FOODGO_HOST`、`OTEL_EXPORTER_OTLP_ENDPOINT`；Gateway 另外看 `FOODGO_ORDERING_URL`、`FOODGO_KITCHEN_URL`。資料庫第一次啟動時服務自己建（`infra.db.ensure_database`）。
+
+### 表的歸屬：每個服務自己的資料庫
+
+| 資料庫 | 表 | 擁有者 |
+|---|---|---|
+| `foodgo_ordering` | `events`、`snapshots`、`outbox`、`order_number` | 點餐 |
+| | `sagas`、`saga_log`、`saga_outbox`、`processed_messages`（consumer `saga`） | 編排器（`foodgo.saga`） |
+| | `order_tracking`、`projection_positions` | 讀取端（`foodgo.tracking`） |
+| `foodgo_payment` | `payments`、`payment_outbox`、`payment_number`、`processed_messages` | 付款 |
+| `foodgo_kitchen` | `tickets`、`kitchen_payments`、`kitchen_outbox`、`ticket_number`、`processed_messages` | 廚房 |
+| `foodgo_delivery` | `deliveries`、`delivery_tickets`、`delivery_outbox`、`delivery_number`、`processed_messages` | 外送 |
+
+- 同一台 PostgreSQL、不同 database：跨 database 不能 JOIN，也不能在同一個交易裡寫兩邊——牆是真的。正式環境可以再進一步分帳號、分機器，程式不用改（只換 `FOODGO_DATABASE_URL`）。
+- `processed_messages` 每個資料庫各一張：同名、不同庫，不是共用的。
+- 第 4 集的 `orders` 表（CRUD 版）沒有搬：只留給第 4、5 集的測試。
+
+### 編排器與讀取端為什麼跟著點餐服務
+
+- **它們服務的是「一張訂單」**：編排器管一張訂單從下單到送出（或倒回去）的流程，讀取端回答「我的訂單到哪了」——都是點餐這個團隊會被問的事。Gateway 只要把 `/orders/*`、`/track/*` 交給點餐服務。
+- **少一點會動的零件**：第 10 集四個服務、第 11 集四個映像檔、第 12 集四個 Deployment，對得上總綱。
+- **要搬出去不用改程式**：`foodgo.saga`、`foodgo.tracking` 本來就是獨立套件（第 8～11 條規則），只吃共同語言、只靠 Kafka 拿資料，它們的表也不和點餐的表 JOIN。哪天編排器要自己擴展，新增一個 `foodgo/services/saga.py`、給它自己的資料庫就好。
+- 代價：點餐服務一個程序裡有四條背景工作；擴展點餐的 API 時編排器、投影也跟著多一份。這樣也安全——consumer group 會把 partition 分給各份，saga 一則一個交易（`FOR UPDATE`＋`processed_messages`）、投影有 advisory lock、relay 用 `SKIP LOCKED`。
+
+### 服務之間怎麼往來：只有 Kafka
+
+- 不 import 彼此（第 12～16 條規則）、不讀彼此的資料庫（連不到）、**不互相呼叫 HTTP**：整個 `src/` 只有 Gateway 用 `httpx`（測試檢查）。
+- 為什麼不讓付款直接 `GET http://ordering/orders/A001` 拿金額？那就把第 3 集解決的問題請回來了：點餐服務一掛，付款也跟著掛。需要的資料，點餐早就公告在事件裡了（`PaymentRequested` 帶金額、`DeliveryRequested` 帶地址，第 7 集）。
+
+| 邊界規則 | 擋什麼 |
+|---|---|
+| 第 12 條「點餐服務只組裝點餐、編排器與讀取端」 | `foodgo.services.ordering` 不能 import 付款、廚房、外送、`foodgo.app` |
+| 第 13 條「付款服務只組裝付款」 | `foodgo.services.payment` 不能 import 點餐、廚房、外送、編排器、讀取端、`foodgo.app` |
+| 第 14 條「廚房服務只組裝廚房」 | 同上，換成廚房 |
+| 第 15 條「外送服務只組裝外送」 | 同上，換成外送 |
+| 第 16 條「Gateway 只認得網址」 | `foodgo.services.gateway` 不能 import 任何上下文、共用核心、共同語言、編排器、讀取端、`foodgo.app`：它只知道路徑開頭和網址 |
+
+服務之間互相 import（例如廚房服務 `from foodgo.services import ordering`）也會被擋：import-linter 看的是**間接**的 import，順著就碰到 `foodgo.ordering`。
+
+### API Gateway
+
+對外唯一的入口：客戶端只認得一個網址（`http://127.0.0.1:8000`），後面怎麼拆、服務搬到哪，客戶端不用知道。FoodGo 的 Gateway 只做三件事：**看路徑轉發**、**給每個請求一個關聯 ID**、**開第一段 span**。不做業務：不看 body、不改回應（狀態碼、`Retry-After` 原樣交回去）。
+
+| 收到 | 轉給 |
+|---|---|
+| `/orders`、`/orders/…`、`/track/…` | 點餐服務 |
+| `/tickets`、`/tickets/…` | 廚房服務 |
+| 其他 | 404（不轉給任何人） |
+
+後面的服務連不上 → 502；5 秒沒回 → 504。常見的 Gateway 還會做驗證身分、限流（本集練習）、快取、把幾個服務的回應拼在一起（BFF）。
+
+### 關聯 ID 與分散式追蹤
+
+| 詞 | 程式／例子 | 意思 |
+|---|---|---|
+| 關聯 ID correlation ID | HTTP header `X-Correlation-ID`；outbox 的 `headers`、Kafka header 的 `correlation_id`；span 的 `foodgo.correlation_id` | 一件事（一個請求引起的所有後續）共用的編號。Gateway 沒收到就產生一個（uuid4），一路往下傳；給人看紀錄、客服查單用 |
+| OpenTelemetry | `foodgo.infra.telemetry` | 收集追蹤資料的標準與函式庫。程式裡只呼叫它的 API；資料送到哪（Jaeger 或別家）是設定的事 |
+| trace | 一張訂單從 `POST /orders` 一路到 `CourierAssigned` | 一件事走過的全部路徑；一條 trace 有一個 trace 編號（32 個十六進位字，回應的 `X-Trace-ID`） |
+| span | `POST /orders`、`send AuthorizePayment`、`payment process AuthorizePayment` | trace 裡的一段：誰（服務）、做什麼、從幾點到幾點、成功還失敗；每段記得自己的上一段（parent） |
+| trace context | `traceparent: 00-<trace 編號>-<span 編號>-03` | W3C Trace Context：跨程序傳遞「你是哪條 trace 的哪一段之後」。HTTP 由 FastAPI／httpx 的 instrument 自動帶；Kafka 自己帶 |
+| exporter | OTLP／HTTP → `http://127.0.0.1:14318` | 把結束的 span 一批一批送出去（每秒一批） |
+| Jaeger | `jaegertracing/jaeger:2.23.0`、<http://127.0.0.1:16686> | 收 span、畫 trace 的工具。資料只放記憶體：容器重開就清空 |
+
+trace 編號和關聯 ID 為什麼兩個都要：trace 是給工具畫圖的（每段的父子、時間），有取樣、有保留期限；關聯 ID 是給人的（印在紀錄裡、客服單上），簡單、一定在。FoodGo 兩個都放：Jaeger 的搜尋頁可以用 Attributes（舊版叫 Tags）`foodgo.correlation_id=<值>` 或 `foodgo.order_id=A001` 搜到那條 trace。
+
+### Kafka 那一段怎麼接上：outbox 多存 header
+
+| 哪裡 | 做什麼 | 程式 |
+|---|---|---|
+| 寫 outbox（和業務資料同一個交易） | 抄下現在的 `traceparent` 與關聯 ID，存進 outbox 新的一欄 `headers jsonb` | `outbox.put()` → `telemetry.outgoing()` |
+| relay 送出 | 從那一列接續，開一個 `send <事件>` span，把它的 `traceparent` 放進 Kafka header | `outbox.relay_once()` → `telemetry.sending()` |
+| consumer 收到 | 從 Kafka header 接續，開一個 `<group> process <事件>` span；處理時又寫 outbox，就接在它後面 | `kafka.consume()` → `telemetry.consuming()` |
+
+為什麼要存進 outbox、不在 relay 送出時「抓現在的」：relay 是另一條執行緒、晚 0.5 秒才送，那時候 `POST /orders` 早就結束了。trace context 要和事件**一起被寫下來**，才接得回去。
+
+沒有 `traceparent` 的列（第 9 集以前寫的、或編排器逾時自己送的命令）照原樣送，不另開一條 trace。Kafka header 照舊有 `event_id`、`type`（第 4 集）。
+
+A001 在 Jaeger 上（`demos/ep10_services.py` 的真實輸出）：1 條 trace、5 個服務、27 個 span——`gateway`：`POST /orders`、`POST → ordering`；`ordering`：`POST /orders`、三則 `send`、編排器的 `saga process …`、投影的 `tracking process …`；`payment`、`kitchen`、`delivery` 各一組 `process` ＋ `send`。拒單（`FOODGO_FAULT_KITCHEN=reject`）也是同一條 trace：`TicketRejected` → `RefundPayment` → `PaymentRefunded` → `CancelOrder` → `OrderCancelled` 一路接下去。

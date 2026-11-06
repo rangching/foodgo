@@ -1,10 +1,13 @@
 """Transactional Outbox：要發的事件先寫進 outbox 表，和業務資料同一個交易；relay 再把它送到 Kafka。"""
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import psycopg
 from psycopg import sql
+from psycopg.types.json import Jsonb
+
+from foodgo.infra import telemetry
 
 
 def schema(table: str = "outbox") -> str:
@@ -18,9 +21,12 @@ CREATE TABLE IF NOT EXISTS {table} (
     type        text        NOT NULL,           -- 事件名稱，例如 OrderPlaced
     payload     json        NOT NULL,           -- 整合事件的 JSON 信封，原封不動
     created_at  timestamptz NOT NULL DEFAULT now(),
-    sent_at     timestamptz                     -- 送到 Kafka 的時間；NULL＝還沒送
+    sent_at     timestamptz,                    -- 送到 Kafka 的時間；NULL＝還沒送
+    headers     jsonb       NOT NULL DEFAULT '{{}}' -- 第 10 集：跟著訊息走的 header（traceparent、correlation_id）
 );
 CREATE INDEX IF NOT EXISTS {table}_unsent ON {table} (id) WHERE sent_at IS NULL;
+-- 第 9 集以前建的表沒有 headers：補上（已經有就什麼都不做）
+ALTER TABLE {table} ADD COLUMN IF NOT EXISTS headers jsonb NOT NULL DEFAULT '{{}}';
 """
 
 
@@ -43,21 +49,25 @@ class OutboxMessage:
     key: str
     type: str
     payload: str
+    extra: dict[str, str] = field(default_factory=dict)  # 第 10 集：寫進來時抄下的 traceparent、correlation_id
 
     @property
     def headers(self) -> dict[str, str]:
-        return {"event_id": self.event_id, "type": self.type}
+        return {"event_id": self.event_id, "type": self.type, **self.extra}
 
 
 def put(conn: psycopg.Connection, *, topic: str, key: str, message: Message, table: str = "outbox") -> None:
-    """把一則要發的事件寫進 outbox。用呼叫的人給的連線，跟著它的交易一起 commit 或 rollback。"""
+    """把一則要發的事件寫進 outbox。用呼叫的人給的連線，跟著它的交易一起 commit 或 rollback。
+
+    第 10 集：順手抄下現在的 trace context 與關聯 ID（沒在追蹤就是 {}）——relay 送出時才接得回這條 trace。
+    """
     payload = message.to_json()
     envelope = json.loads(payload)
     conn.execute(
-        sql.SQL("INSERT INTO {} (event_id, topic, key, type, payload) VALUES (%s, %s, %s, %s, %s)").format(
+        sql.SQL("INSERT INTO {} (event_id, topic, key, type, payload, headers) VALUES (%s, %s, %s, %s, %s, %s)").format(
             sql.Identifier(table)
         ),
-        (envelope["event_id"], topic, key, envelope["type"], payload),
+        (envelope["event_id"], topic, key, envelope["type"], payload, Jsonb(telemetry.outgoing())),
     )
 
 
@@ -81,14 +91,15 @@ def relay_once(
     with psycopg.connect(url) as conn:
         rows = conn.execute(
             sql.SQL(
-                "SELECT id, event_id, topic, key, type, payload::text FROM {}"
+                "SELECT id, event_id, topic, key, type, payload::text, headers FROM {}"
                 " WHERE sent_at IS NULL ORDER BY id LIMIT %s FOR UPDATE SKIP LOCKED"
             ).format(sql.Identifier(table)),
             (limit,),
         ).fetchall()
         batch = [OutboxMessage(*row) for row in rows]
         for message in batch:
-            sender.send(message.topic, message.key, message.payload, message.headers)
+            with telemetry.sending(message.topic, message.key, message.type, message.headers) as headers:  # 第 10 集
+                sender.send(message.topic, message.key, message.payload, headers)
         sender.flush()
         for message in batch:
             print(f"{who}：送出 {message.type} {message.key} → {message.topic}（event_id {message.event_id[:8]}…）", flush=True)
