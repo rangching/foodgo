@@ -17,7 +17,8 @@ def services() -> dict:
 
 
 def test_three_services(services):
-    assert set(services) == {"kafka", "kafka-ui", "postgres"}
+    # 第 10 集起多了 jaeger（tests/ep10 檢查它）：這裡只要求第 4 集的三個都還在
+    assert {"kafka", "kafka-ui", "postgres"} <= set(services)
     assert services["kafka"]["image"].startswith("apache/kafka:")
     assert services["kafka-ui"]["image"].startswith("kafbat/kafka-ui:")
     assert services["postgres"]["image"].startswith("postgres:17.")
