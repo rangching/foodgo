@@ -44,7 +44,7 @@ def test_domain_event_keeps_prices_inside_ordering():
     order.add_line("牛肉麵", Money(160))
     order.add_line("紅茶", Money(40))
     order.place()
-    [event] = order.pull_events()
+    *_, event = order.pull_events()  # 最後一個是 OrderPlaced；前面是建立草稿、加品項（第 6 集起）
 
     assert isinstance(event, OrderPlaced)
     assert [(line.name, line.unit_price, line.quantity) for line in event.lines] == [

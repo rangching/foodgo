@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from foodgo.ordering.events import OrderCancelled, OrderPlaced
+from foodgo.ordering.events import ItemAdded, OrderCancelled, OrderDrafted, OrderPlaced
 from foodgo.ordering.model import (
     Address,
     Money,
@@ -164,7 +164,8 @@ def test_cancel_rules(prepare, reason):
 # ---------------------------------------------------------------- 領域事件
 def test_aggregate_collects_events_and_hands_them_out_once():
     order = a001()
-    assert order.pull_events() == []
+    # 第 6 集起，建立草稿、加品項也各記一個事件（事件溯源要靠它們把訂單算回來）
+    assert [type(e) for e in order.pull_events()] == [OrderDrafted, ItemAdded, ItemAdded]
     order.place()
     events = order.pull_events()
     assert len(events) == 1 and isinstance(events[0], OrderPlaced)
@@ -176,7 +177,7 @@ def test_cancel_records_order_cancelled():
     order = a001()
     order.place()
     order.cancel("顧客改變心意")
-    placed, cancelled = order.pull_events()
+    *_, placed, cancelled = order.pull_events()  # 前面是建立草稿、加品項的事件（第 6 集起）
     assert isinstance(placed, OrderPlaced)
     assert isinstance(cancelled, OrderCancelled) and cancelled.reason == "顧客改變心意"
 

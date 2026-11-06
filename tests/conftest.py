@@ -1,4 +1,4 @@
-"""第 4 集的測試工具。
+"""整合測試的共用工具（第 4 集起；第 6 集從 tests/ep04/conftest.py 搬到這裡，給每一集用）。
 
 標了 @pytest.mark.integration 的測試要連 Kafka 與 PostgreSQL：先 docker compose up -d。
 連不到就自動略過（skipped），不用 Docker 的單元測試照跑。
@@ -68,10 +68,15 @@ def db_url(test_db_url: str) -> str:
     from foodgo.kitchen.postgres import SCHEMAS as KITCHEN
     from foodgo.ordering.postgres import SCHEMAS as ORDERING
 
+    try:
+        from foodgo.ordering.event_sourcing import SCHEMAS as EVENT_SOURCING  # 第 6 集：events、snapshots
+    except ImportError:  # 第 6 集起點還沒有
+        EVENT_SOURCING = ()
+
     with psycopg.connect(test_db_url, autocommit=True) as conn:
         conn.execute("DROP SCHEMA public CASCADE")
         conn.execute("CREATE SCHEMA public")
-    db.create_tables(test_db_url, *ORDERING, *KITCHEN)
+    db.create_tables(test_db_url, *ORDERING, *EVENT_SOURCING, *KITCHEN)
     return test_db_url
 
 

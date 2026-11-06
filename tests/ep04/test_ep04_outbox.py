@@ -14,7 +14,8 @@ from foodgo import contracts
 from foodgo.app import create_app
 from foodgo.infra import outbox
 from foodgo.infra.kafka import KafkaSender
-from foodgo.ordering.events import OrderCancelled, OrderPlaced
+from foodgo.ordering.events import ItemAdded, OrderCancelled, OrderDrafted, OrderPlaced
+from foodgo.ordering.fold import OrderState
 from foodgo.ordering.integration import to_integration
 from foodgo.ordering.model import (
     Address,
@@ -61,25 +62,30 @@ def test_saving_also_hands_out_the_events():
     order = a001()
     order.place()
     repo.save(order)
-    assert [type(e) for e in published] == [OrderPlaced]
+    placed = [OrderDrafted, ItemAdded, ItemAdded, OrderPlaced]  # 第 6 集起，每個動作都記一個事件
+    assert [type(e) for e in published] == placed
     assert order.pull_events() == []  # Repository 已經取走了
 
     order.cancel("顧客改變心意")
     repo.save(order)
-    assert [type(e) for e in published] == [OrderPlaced, OrderCancelled]
+    assert [type(e) for e in published] == [*placed, OrderCancelled]
 
 
-def test_restore_puts_an_order_back_without_new_events():
-    order = Order.restore(
+def test_from_state_puts_an_order_back_without_new_events():
+    # 第 6 集：Order.restore() 換成 Order.from_state()——訂單一律從 OrderState 擺回來
+    # （事件溯源版的 state 是 fold 算出來的；第 4 集的 CRUD 版是讀 orders 表的一列）
+    state = OrderState(
         order_id="A001",
         customer_id="C042",
         restaurant_id="R007",
         delivery_address=Address("信義路五段 7 號"),
         delivery_fee=Money(30),
         note="不要香菜",
-        lines=[OrderLine("牛肉麵", Money(160)), OrderLine("紅茶", Money(40))],
+        lines=(OrderLine("牛肉麵", Money(160)), OrderLine("紅茶", Money(40))),
         status=OrderStatus.PLACED,
+        version=4,
     )
+    order = Order.from_state(state)
     assert order.total == Money(230)
     assert order.pull_events() == []  # 事情早就發生過了，不再記一次
     with pytest.raises(OrderRuleViolation):

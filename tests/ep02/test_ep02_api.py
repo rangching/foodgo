@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from foodgo.app import create_app
-from foodgo.ordering.events import OrderCancelled, OrderPlaced
+from foodgo.ordering.events import ItemAdded, OrderCancelled, OrderDrafted, OrderPlaced
 
 A001 = {
     "customer_id": "C042",
@@ -77,9 +77,10 @@ def test_cancel_twice_is_409(client):
 
 def test_events_are_published_once(client, published):
     client.post("/orders", json=A001)
-    assert [type(e) for e in published] == [OrderPlaced]
+    placed = [OrderDrafted, ItemAdded, ItemAdded, OrderPlaced]  # 第 6 集起，每個動作都記一個事件
+    assert [type(e) for e in published] == placed
     client.post("/orders/A001/cancel", json={"reason": "顧客改變心意"})
-    assert [type(e) for e in published] == [OrderPlaced, OrderCancelled]
+    assert [type(e) for e in published] == [*placed, OrderCancelled]
 
 
 def test_docs_page_lists_the_order_api(client):
