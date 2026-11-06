@@ -27,7 +27,7 @@ messages_in = _EP07.messages_in  # 一個 topic 裡現在有的所有訊息
 
 @pytest.fixture
 def saga_topics():
-    """八個臨時 topic：四個事件 topic、四個命令 topic。測完刪掉。"""
+    """八個臨時 topic：四個事件 topic、四個命令 topic；第 9 集起多一條編排器自己的事件 topic（saga）。測完刪掉。"""
     from confluent_kafka.admin import AdminClient
 
     from foodgo.infra import config, kafka
@@ -37,6 +37,7 @@ def saga_topics():
     for ctx in ("ordering", "payment", "kitchen", "delivery"):
         names[ctx] = f"test.{ctx}.events.{suffix}"
         names[f"{ctx}_commands"] = f"test.{ctx}.commands.{suffix}"
+    names["saga"] = f"test.saga.events.{suffix}"  # 第 9 集：轉人工處理時公告 SagaEscalated
     for name in names.values():
         kafka.ensure_topic(name)
     yield SimpleNamespace(**names)

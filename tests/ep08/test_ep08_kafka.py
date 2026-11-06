@@ -67,7 +67,8 @@ class Cluster:
             "kitchen": t.kitchen_commands,
             "delivery": t.delivery_commands,
         }
-        self.sagas = PostgresSagaRepository(db_url, topics=commands)
+        # "saga"：編排器自己公告的事件（第 9 集起放棄時公告 SagaEscalated）也送到臨時 topic，不碰正式的 saga.events
+        self.sagas = PostgresSagaRepository(db_url, topics={**commands, "saga": t.saga})
         self.orchestrator = Orchestrator(self.sagas, Settings(timeout=timeout, retries=1))
         self.groups = {name: group() for name in ("saga", "ordering", "payment", "kitchen", "delivery")}
 
