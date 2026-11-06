@@ -1,5 +1,6 @@
 """Kafka 的薄薄一層（confluent-kafka）：建 topic、送訊息、以 consumer group 收訊息。"""
 import threading
+import time
 from collections.abc import Callable, Sequence
 
 from confluent_kafka import (
@@ -16,17 +17,34 @@ from confluent_kafka.admin import AdminClient, NewTopic
 from foodgo.infra import config, telemetry
 
 
-def ensure_topic(topic: str, *, partitions: int = 3, bootstrap: str | None = None) -> None:
-    """topic 不存在就建一個。單節點 Kafka，副本數只能是 1。"""
+def ensure_topic(topic: str, *, partitions: int = 3, bootstrap: str | None = None, timeout: float = 10.0) -> None:
+    """topic 不存在就建一個。單節點 Kafka，副本數只能是 1。
+
+    第 11 集：建好（或別人剛建好）還不夠，要等到每個 partition 都有 leader 才回來。五個容器同時起的時候，
+    別的服務剛建的 topic 已經列得出來、leader 卻還沒選好；這時 consumer 一訂閱就收到
+    「Unknown topic or partition」，背景工作當掉。本機一個一個起程序時碰不到，容器一起起才撞到。
+    """
     admin = AdminClient({"bootstrap.servers": bootstrap or config.kafka_bootstrap()})
-    if topic in admin.list_topics(timeout=10).topics:
-        return
-    future = admin.create_topics([NewTopic(topic, num_partitions=partitions, replication_factor=1)])[topic]
-    try:
-        future.result()
-    except KafkaException as error:
-        if error.args[0].code() != KafkaError.TOPIC_ALREADY_EXISTS:
-            raise
+    if topic not in admin.list_topics(timeout=10).topics:
+        future = admin.create_topics([NewTopic(topic, num_partitions=partitions, replication_factor=1)])[topic]
+        try:
+            future.result()
+        except KafkaException as error:
+            if error.args[0].code() != KafkaError.TOPIC_ALREADY_EXISTS:
+                raise
+    deadline = time.monotonic() + timeout
+    while not _ready(admin, topic):
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"topic {topic} 建好了，等了 {timeout:g} 秒還沒有 leader")
+        time.sleep(0.2)
+
+
+def _ready(admin: AdminClient, topic: str) -> bool:
+    """這個 topic 的每個 partition 都選好 leader 了嗎（consumer 訂閱、producer 送出都要有 leader）。"""
+    found = admin.list_topics(topic, timeout=5).topics.get(topic)
+    if found is None or found.error is not None or not found.partitions:
+        return False
+    return all(p.leader >= 0 and p.error is None for p in found.partitions.values())
 
 
 class KafkaSender:

@@ -867,3 +867,80 @@ trace 編號和關聯 ID 為什麼兩個都要：trace 是給工具畫圖的（�
 沒有 `traceparent` 的列（第 9 集以前寫的、或編排器逾時自己送的命令）照原樣送，不另開一條 trace。Kafka header 照舊有 `event_id`、`type`（第 4 集）。
 
 A001 在 Jaeger 上（`demos/ep10_services.py` 的真實輸出）：1 條 trace、5 個服務、27 個 span——`gateway`：`POST /orders`、`POST → ordering`；`ordering`：`POST /orders`、三則 `send`、編排器的 `saga process …`、投影的 `tracking process …`；`payment`、`kitchen`、`delivery` 各一組 `process` ＋ `send`。拒單（`FOODGO_FAULT_KITCHEN=reject`）也是同一條 trace：`TicketRejected` → `RefundPayment` → `PaymentRefunded` → `CancelOrder` → `OrderCancelled` 一路接下去。
+
+## 一次打包到處跑（第 11 集：容器）
+
+### 映像檔與容器
+
+| 詞 | FoodGo 的例子 | 意思 |
+|---|---|---|
+| 映像檔 image | `foodgo:0.11.0`、`postgres:17.11` | 一包「跑這個程式需要的全部檔案」＋啟動設定（`ENV`、`USER`、`CMD`、`HEALTHCHECK`）。唯讀；同一個映像檔在誰的電腦上跑都一樣 |
+| 容器 container | `foodgo-kitchen-1` | 映像檔跑起來的一份：一個程序（PID 1）＋自己的檔案系統（映像檔上面多一層可寫的）、自己的網路與名字。刪掉容器，可寫的那一層就跟著不見 |
+| 層 layer | `COPY --from=builder /app/.venv` 那一層 144 MB | `Dockerfile` 裡每個 `RUN`、`COPY` 疊一層；沒變的層直接用快取。`docker history foodgo:0.11.0` 看每一層多大 |
+| tag | `0.11.0`（跟著 `foodgo.infra.service.VERSION`） | 映像檔的版本名。一律釘明確版本，不用 `latest`：`latest` 今天和下個月可能是兩個東西 |
+| `Dockerfile` | repo 根目錄 | 怎麼做映像檔的食譜，一行一個步驟 |
+| build context | `docker build .` 的那個 `.` | 送進建置的檔案；`.dockerignore` 決定哪些不送 |
+| `.dockerignore` | 先 `*` 全部排除，再 `!src`、`!pyproject.toml`… 放回來 | 沒列的不送：`.env`、`.venv`、`.git`、`tests/` 都不會進映像檔，新增的檔案也預設不送 |
+| registry | Docker Hub、`ghcr.io` | 放映像檔的地方。第 12 集的 kind 不從 registry 拉 FoodGo，而是把本機的映像檔直接載進叢集 |
+
+| 指令 | 做什麼 |
+|---|---|
+| `docker image ls` | 本機有哪些映像檔、多大 |
+| `docker run --rm -it <映像檔> <指令>` | 用映像檔起一個容器跑指令，結束就刪（`--rm`） |
+| `docker ps` | 正在跑的容器 |
+| `docker exec <容器> <指令>` | 在**已經在跑**的容器裡再跑一個指令（看看裡面長什麼樣） |
+| `docker history <映像檔>` | 每一層是哪一行做的、多大 |
+| `docker inspect <容器>` | 容器的全部設定與狀態，包括最近幾次健康檢查的輸出 |
+
+### Dockerfile：多階段建置
+
+**多階段建置**（multi-stage build）：一個 `Dockerfile` 寫兩段 `FROM`。第一段 builder 裝工具、下載、編譯；第二段只從第一段**複製成品**。最後的映像檔只有第二段的東西。
+
+| | builder（第一段） | 最後的映像檔（第二段） |
+|---|---|---|
+| base image | `python:3.12.15-slim-trixie` | 同一個（`.venv/bin/python` 指向 `/usr/local/bin/python3.12`，兩邊要一樣） |
+| 有 uv 嗎 | 有：`COPY --from=ghcr.io/astral-sh/uv:0.12.19 /uv /bin/uv` | 沒有 |
+| 原始碼、`uv.lock` | 有 | 沒有：`uv sync --no-editable` 把 foodgo 裝成一般套件，只要 `.venv` |
+| 開發用套件（pytest、import-linter） | 沒裝（`--no-dev`） | 沒有 |
+| 誰在跑 | root | `foodgo`（uid 10001），檔案屬於 root、只能讀 |
+
+**先裝依賴、再放程式碼**：第一次 `uv sync --no-install-project` 只看得到 `pyproject.toml`、`uv.lock`（`--mount=type=bind`），裝完第三方套件；之後才 `COPY . /app`、再 `uv sync` 裝 foodgo 本身。只改程式碼時，裝依賴那一層直接用快取，重建幾秒就好。
+
+**`--mount=type=cache,target=/root/.cache/uv`**：uv 下載過的套件留在**建置機器**上的快取，下次建置不用重新下載；快取不會進映像檔。要 BuildKit（Docker Desktop 內建；colima 要另外 `brew install docker-buildx`）。
+
+**非 root**：`USER 10001:10001`。容器裡的程式被打穿時，拿到的是一個不能改程式、不能裝東西的使用者。用數字不用名字：第 12 集 K8S 的 `runAsNonRoot` 要看得出不是 0。
+
+FoodGo 的映像檔（arm64，Docker 29 的 containerd 映像檔儲存）：`docker image ls` 的 CONTENT SIZE 83.1 MB（壓縮後，push／pull 傳的大小）、DISK USAGE 386 MB（本機佔用：壓縮檔＋解開的檔案）；7 層，FoodGo 自己加的只有三層（建使用者 41 kB、`.venv` 144 MB、`WORKDIR`）。
+
+### 一個映像檔、五個容器
+
+Gateway 與四個服務是**同一包程式**（同一份 `pyproject.toml`、`uv.lock`，第 10 集），只差 `python -m foodgo.services.<名字>`。所以 FoodGo 只有**一個** `Dockerfile`、**一個**映像檔 `foodgo:0.11.0`，`compose.yaml` 用 `command` 決定每個容器跑哪一個（第 12 集是 Deployment 的 `command`）。
+
+- 好處：建一次、掃一次、載進叢集一次；五個容器的套件版本保證一樣。
+- 代價：每個容器都帶著全部上下文的程式（Gateway 的映像檔裡也有付款的程式碼）。邊界靠 import-linter（第 12～16 條）守，不靠映像檔。
+- 什麼時候該拆成每服務一個 `Dockerfile`：各服務的依賴差很多（例如只有一個要 GPU 套件）、或由不同團隊各自發版。
+
+容器裡的位址和本機不一樣：
+
+| | 本機（第 10 集，`uv run`） | 容器裡（第 11 集，compose） |
+|---|---|---|
+| 服務聽哪裡 | `127.0.0.1:8101`…（每個程序一個埠） | `0.0.0.0:8000`（每個容器有自己的網路，都用 8000；`FOODGO_HOST`、`FOODGO_<名字>_PORT` 寫在 `Dockerfile` 的 `ENV`） |
+| 找 Kafka | `127.0.0.1:19092` | `kafka:9092`（容器名字就是主機名稱） |
+| 找 PostgreSQL | `127.0.0.1:15432/foodgo_kitchen` | `postgres:5432/foodgo_kitchen` |
+| 送 span | `http://127.0.0.1:14318` | `http://jaeger:4318` |
+| Gateway 找服務 | `http://127.0.0.1:8101` | `http://ordering:8000` |
+| 從外面連得到的 | 五個埠都可以 | 只有 Gateway（`${FOODGO_GATEWAY_PORT:-8000}:8000`） |
+
+### 健康檢查與重新啟動
+
+| 詞 | FoodGo | 意思 |
+|---|---|---|
+| `HEALTHCHECK` | `python -m foodgo.infra.healthcheck`（問自己的 `/healthz`） | 寫在 `Dockerfile`：Docker 每 10 秒在容器裡跑一次，結束碼 0＝健康。映像檔裡沒有 curl，所以用 Python 標準函式庫 |
+| starting／healthy／unhealthy | `docker compose ps` 的 `(healthy)` | 剛起來在 start period（30 秒，每秒問一次）內失敗不算；之後連續 3 次失敗 → `unhealthy` |
+| `depends_on` ＋ `condition: service_healthy` | 服務等 Kafka、PostgreSQL、Jaeger；Gateway 等四個服務 | 等對方**健康**了才起，不只是「起來了」 |
+| `restart: unless-stopped` | 五個 FoodGo 容器 | **程序結束**（當掉、被 `kill`）就重新啟動；自己 `docker compose stop` 的不會 |
+| profile | `profiles: [app]` | 加 `--profile app` 才起。`docker compose up -d` 照舊只起四個基礎設施（第 4～10 集用 uv 在本機跑程式） |
+
+**unhealthy 不等於重新啟動**：`FOODGO_FAULT_KITCHEN=crash` 讓廚房的背景工作當掉，程序還活著、`/healthz` 回 503 → 30 秒後 `docker compose ps` 顯示 `(unhealthy)`。Docker 只是**標出來**，不會把它重開（restart policy 只看程序有沒有結束）。會自己把不健康的容器換掉的是第 12 集的 Kubernetes（存活探針）。
+
+**容器一起起來才撞到的問題**：五個容器同時起，點餐服務訂閱 `kitchen.events` 時，廚房服務剛建好它、leader 還沒選好，consumer 收到「Unknown topic or partition」就當掉。第 11 集讓 `kafka.ensure_topic()` 等到每個 partition 都有 leader 才回來。本機一個一個起程序時碰不到。

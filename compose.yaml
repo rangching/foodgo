@@ -1,12 +1,32 @@
 # 第 4 集：Kafka（KRaft 單節點）、Kafka UI、PostgreSQL。第 10 集：加上 Jaeger（分散式追蹤）。
+# 第 11 集：加上 FoodGo 自己的五個容器（Gateway＋四個服務），放在 profile「app」裡。
 #
-#   docker compose up -d      # 啟動（第一次會先下載 image）
-#   docker compose ps         # 四個服務都要是 (healthy)
-#   docker compose down       # 停掉；資料留在 volume 裡
-#   docker compose down -v    # 停掉並清空 Kafka 與資料庫
+#   docker compose up -d                              # 只起基礎設施（四個）：第 4～10 集照舊，程式用 uv 在本機跑
+#   docker compose --profile app up -d --build --wait # 第 11 集：建映像檔、起全部（九個），等到都健康
+#   docker compose --profile app ps                   # 九個都要是 (healthy)
+#   docker compose --profile app down                 # 停掉；資料留在 volume 裡（不加 --profile app 的話 FoodGo 的容器會留著）
+#   docker compose --profile app down -v              # 停掉並清空 Kafka 與資料庫
 #
 # 埠號刻意避開常見的 9092／8080／5432。被占用時，複製 .env.example 成 .env 改埠號。
 name: foodgo
+
+# 第 11 集：五個 FoodGo 容器共用的設定（x- 開頭的欄位 compose 不管，給下面用 <<: * 合併進去）
+x-foodgo: &foodgo
+  image: foodgo:0.11.0 # 跟著程式版本（foodgo.infra.service.VERSION）
+  build: .
+  profiles: [app] # 加 --profile app 才會起
+  restart: unless-stopped # 程序結束（當掉、被 kill）就重新啟動；自己 docker compose stop 的不會
+  depends_on: # 等基礎設施健康了才起
+    kafka: { condition: service_healthy }
+    postgres: { condition: service_healthy }
+    jaeger: { condition: service_healthy }
+
+x-otel: &otel
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318 # span 送到 Jaeger（容器之間用名字找，不是 127.0.0.1）
+
+x-backend: &backend
+  <<: *otel
+  FOODGO_KAFKA_BOOTSTRAP: kafka:9092 # compose 的 INTERNAL listener（第 4 集就有）
 
 services:
   kafka:
@@ -95,6 +115,62 @@ services:
       retries: 5
       start_period: 20s
       start_interval: 2s
+
+  # ---------------------------------------------------------------- 第 11 集：FoodGo 自己的五個容器
+  # 同一個映像檔（Dockerfile → foodgo:0.11.0），只差 command 啟動哪一個模組。
+  # 容器之間用服務名字互相找：kafka:9092、postgres:5432、jaeger:4318、ordering:8000…（compose 的網路自帶 DNS）。
+  # 健康檢查寫在 Dockerfile 的 HEALTHCHECK（問自己的 /healthz），這裡不用再寫一次。
+  gateway:
+    <<: *foodgo
+    command: ["python", "-m", "foodgo.services.gateway"]
+    environment:
+      <<: *otel
+      FOODGO_ORDERING_URL: http://ordering:8000
+      FOODGO_PAYMENT_URL: http://payment:8000
+      FOODGO_KITCHEN_URL: http://kitchen:8000
+      FOODGO_DELIVERY_URL: http://delivery:8000
+    ports:
+      - "${FOODGO_GATEWAY_PORT:-8000}:8000" # 對外唯一的入口：http://127.0.0.1:8000
+    depends_on:
+      ordering: { condition: service_healthy }
+      payment: { condition: service_healthy }
+      kitchen: { condition: service_healthy }
+      delivery: { condition: service_healthy }
+
+  ordering:
+    <<: *foodgo
+    command: ["python", "-m", "foodgo.services.ordering"]
+    environment:
+      <<: *backend
+      FOODGO_DATABASE_URL: postgresql://foodgo:foodgo@postgres:5432/foodgo_ordering
+      FOODGO_FAULT_RELAY: ${FOODGO_FAULT_RELAY:-}
+      FOODGO_SAGA_TIMEOUT: ${FOODGO_SAGA_TIMEOUT:-3}
+      FOODGO_SAGA_RETRIES: ${FOODGO_SAGA_RETRIES:-1}
+
+  payment:
+    <<: *foodgo
+    command: ["python", "-m", "foodgo.services.payment"]
+    environment:
+      <<: *backend
+      FOODGO_DATABASE_URL: postgresql://foodgo:foodgo@postgres:5432/foodgo_payment
+      FOODGO_FAULT_PAYMENT: ${FOODGO_FAULT_PAYMENT:-} # decline：每一筆都被拒絕
+      FOODGO_FAULT_REFUND: ${FOODGO_FAULT_REFUND:-} # fail：退款都失敗
+
+  kitchen:
+    <<: *foodgo
+    command: ["python", "-m", "foodgo.services.kitchen"]
+    environment:
+      <<: *backend
+      FOODGO_DATABASE_URL: postgresql://foodgo:foodgo@postgres:5432/foodgo_kitchen
+      FOODGO_FAULT_KITCHEN: ${FOODGO_FAULT_KITCHEN:-} # reject／slow／crash（crash：背景工作停了 → unhealthy）
+      FOODGO_KITCHEN_SLOW_SECONDS: ${FOODGO_KITCHEN_SLOW_SECONDS:-4}
+
+  delivery:
+    <<: *foodgo
+    command: ["python", "-m", "foodgo.services.delivery"]
+    environment:
+      <<: *backend
+      FOODGO_DATABASE_URL: postgresql://foodgo:foodgo@postgres:5432/foodgo_delivery
 
 volumes:
   kafka-data:

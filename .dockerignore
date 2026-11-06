@@ -1,0 +1,11 @@
+# 第 11 集：送進 docker build 的「建置內容」（build context）只放做映像檔要用的。
+# 寫法是「先全部排除，再一個一個放回來」：新增的檔案預設不會被送進去（.env、.venv、.git 不會不小心進映像檔）。
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!README.md
+!src
+# 放回來的 src/ 裡，本機跑過留下的快取也不要
+**/__pycache__
+**/*.pyc

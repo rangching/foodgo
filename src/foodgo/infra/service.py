@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 
 from foodgo.infra import config, telemetry
 
-VERSION = "0.10.0"
+VERSION = "0.11.0"
 
 
 @dataclass

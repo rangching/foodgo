@@ -273,3 +273,66 @@ docker compose exec postgres psql -U foodgo -d foodgo_ordering -c "SELECT type, 
 
 第 4～9 集的單一程序（`uv run fastapi dev`、`python -m foodgo.kitchen.consumer`…）照樣能跑，用的是資料庫 `foodgo`；和第 10 集的服務用同一組 topic 與 consumer group 名字，**不要同時開**（換之前 `docker compose down -v`）。
 埠號被占用：服務的埠用 `FOODGO_GATEWAY_PORT`、`FOODGO_ORDERING_PORT`…改；Jaeger 用 `.env` 的 `FOODGO_JAEGER_UI_PORT`、`FOODGO_OTLP_PORT`。
+
+## 一次打包到處跑：容器（第 11 集）
+
+第 11 集起 FoodGo 有自己的映像檔（`Dockerfile`）：**一個映像檔 `foodgo:0.11.0`、五個容器**（Gateway＋四個服務，只差 `command`）。`compose.yaml` 把它們放在 profile `app`：
+
+```bash
+docker compose up -d                             # 只起基礎設施（Kafka、Kafka UI、PostgreSQL、Jaeger）：第 4～10 集照舊用 uv 在本機跑程式
+docker compose --profile app up -d --build --wait  # 建映像檔、起全部九個，等到全部 healthy
+docker compose --profile app ps                  # 九個都要是 (healthy)
+```
+
+要 BuildKit（`Dockerfile` 用了 `RUN --mount=type=cache`）：Docker Desktop 內建；colima 要 `brew install docker-buildx`（`docker buildx version` 有版本號就對了）。
+
+| 容器 | 映像檔 | 對外的埠 | 資料庫 |
+|---|---|---|---|
+| gateway | `foodgo:0.11.0` | `${FOODGO_GATEWAY_PORT:-8000}` → 8000（對外唯一的入口） | 無 |
+| ordering | `foodgo:0.11.0` | 無（只有容器之間連得到 `ordering:8000`） | `foodgo_ordering` |
+| payment | `foodgo:0.11.0` | 無 | `foodgo_payment` |
+| kitchen | `foodgo:0.11.0` | 無 | `foodgo_kitchen` |
+| delivery | `foodgo:0.11.0` | 無 | `foodgo_delivery` |
+
+從 Gateway 下單、看 trace（和第 10 集一樣，只是五個程序換成容器）：
+
+```bash
+curl -si http://127.0.0.1:8000/orders -H 'Content-Type: application/json' \
+  -d '{"customer_id":"C042","restaurant_id":"R007","lines":[{"name":"牛肉麵","unit_price":160,"quantity":1},{"name":"紅茶","unit_price":40,"quantity":1}],"delivery_fee":30,"note":"不要香菜","delivery_address":"信義路五段 7 號"}'
+uv run python demos/ep10_services.py trace <回應的 X-Trace-ID>
+```
+
+| 網址 | 看什麼 |
+|---|---|
+| <http://127.0.0.1:8000/services> | Gateway 問四個服務容器的 `/healthz` |
+| <http://127.0.0.1:16686/search?service=gateway> | Jaeger：一條 trace、5 個服務、27 個 span，和第 10 集一樣 |
+| <http://127.0.0.1:18080/ui/clusters/foodgo/all-topics/ordering.events/messages> | Kafka UI：容器送出的訊息 |
+
+故障開關從終端機帶進 compose（只會給那一個服務）：
+
+```bash
+FOODGO_FAULT_KITCHEN=crash docker compose --profile app up -d kitchen   # 換一個會當掉的廚房
+docker compose --profile app ps kitchen                                 # 下一張單後約 30 秒：(unhealthy)
+docker compose --profile app up -d kitchen                              # 換回正常的廚房
+```
+
+`unhealthy` 只是標出來，Docker 不會重開它；`restart: unless-stopped` 只在**程序結束**時重開（試試 `docker compose --profile app exec kitchen sh -c 'kill 1'`）。會把不健康的容器換掉的是第 12 集的 Kubernetes。
+
+映像檔多大、有幾層：
+
+```bash
+docker image ls foodgo
+docker history foodgo:0.11.0
+```
+
+記憶體：九個容器一起跑約 1.1 GB（Kafka 約 310 MB、Kafka UI 約 410 MB、PostgreSQL 約 65 MB、Jaeger 約 15 MB、五個 FoodGo 容器各約 55～60 MB）。Docker 至少給 4 GB 就夠；不夠時 Kafka 的 `KAFKA_HEAP_OPTS`、Kafka UI 的 `JAVA_OPTS` 可以再調小。
+
+收拾（**要加 `--profile app`**：不加的話只會停基礎設施，五個 FoodGo 容器還留著）：
+
+```bash
+docker compose --profile app down        # 停掉；資料留著
+docker compose --profile app down -v     # 連 Kafka 與資料庫一起清
+docker image rm foodgo:0.11.0            # 刪掉映像檔（下次 --build 再建）
+```
+
+第 10 集的本機五個程序（`uv run python demos/ep10_services.py up`）和這一集的容器用同一組 topic、consumer group 名字與 Gateway 埠 8000，**不要同時開**。
