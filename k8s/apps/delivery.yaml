@@ -1,0 +1,84 @@
+# 外送服務（第 10 集）：聽 delivery.commands、回覆到 delivery.events；沒有對外的 API、沒有故障開關。
+# 長得和 kitchen.yaml 一樣（註解看那一份），只差 command 與資料庫。
+apiVersion: v1
+kind: Service
+metadata:
+  name: delivery # Gateway 的 /services 問 http://delivery:8000/healthz
+spec:
+  selector:
+    app: delivery
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: delivery
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: delivery
+  template:
+    metadata:
+      labels:
+        app: delivery
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: delivery
+          image: foodgo
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "foodgo.services.delivery"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: foodgo
+          env:
+            - name: FOODGO_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: foodgo-db
+                  key: delivery
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

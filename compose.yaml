@@ -12,7 +12,7 @@ name: foodgo
 
 # 第 11 集：五個 FoodGo 容器共用的設定（x- 開頭的欄位 compose 不管，給下面用 <<: * 合併進去）
 x-foodgo: &foodgo
-  image: foodgo:0.11.0 # 跟著程式版本（foodgo.infra.service.VERSION）
+  image: foodgo:0.12.0 # 跟著程式版本（foodgo.infra.service.VERSION）
   build: .
   profiles: [app] # 加 --profile app 才會起
   restart: unless-stopped # 程序結束（當掉、被 kill）就重新啟動；自己 docker compose stop 的不會

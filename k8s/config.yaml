@@ -1,0 +1,16 @@
+# ConfigMap：五個 FoodGo 容器共用的設定（不是秘密的那些）。每個 Deployment 用 envFrom 整包變成環境變數。
+# 值和第 11 集 compose.yaml 一模一樣：Service 的名字就叫 kafka、jaeger、ordering…，叢集的 DNS 會把名字換成位址，程式不用改。
+#
+# 改了這裡再 apply，已經在跑的 Pod 不會知道（環境變數只在容器啟動時讀一次）：kubectl rollout restart deployment 換一批新的。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foodgo
+data:
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318 # span 送到 Jaeger
+  FOODGO_KAFKA_BOOTSTRAP: kafka:9092
+  # Gateway 去哪裡找四個服務（其他服務用不到，拿到也不會用）
+  FOODGO_ORDERING_URL: http://ordering:8000
+  FOODGO_PAYMENT_URL: http://payment:8000
+  FOODGO_KITCHEN_URL: http://kitchen:8000
+  FOODGO_DELIVERY_URL: http://delivery:8000

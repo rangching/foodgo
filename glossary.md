@@ -944,3 +944,72 @@ Gateway 與四個服務是**同一包程式**（同一份 `pyproject.toml`、`uv
 **unhealthy 不等於重新啟動**：`FOODGO_FAULT_KITCHEN=crash` 讓廚房的背景工作當掉，程序還活著、`/healthz` 回 503 → 30 秒後 `docker compose ps` 顯示 `(unhealthy)`。Docker 只是**標出來**，不會把它重開（restart policy 只看程序有沒有結束）。會自己把不健康的容器換掉的是第 12 集的 Kubernetes（存活探針）。
 
 **容器一起起來才撞到的問題**：五個容器同時起，點餐服務訂閱 `kitchen.events` 時，廚房服務剛建好它、leader 還沒選好，consumer 收到「Unknown topic or partition」就當掉。第 11 集讓 `kafka.ensure_topic()` 等到每個 partition 都有 leader 才回來。本機一個一個起程序時碰不到。
+
+## 交給 K8S 調度（第 12 集：Kubernetes）
+
+### 叢集與物件
+
+| 詞 | FoodGo 的例子 | 意思 |
+|---|---|---|
+| Kubernetes（K8S） | kind 建的本機叢集 `foodgo` | 你說「要什麼」（幾個、長什麼樣），它負責一直維持成那樣：少了補、壞了換、改了一個一個換新 |
+| kind | `kind create cluster --config kind-config.yaml` | Kubernetes in Docker：每個節點是一個 Docker 容器。本機練習用；`kind load docker-image` 把本機的映像檔直接載進節點，不經過 registry |
+| kubectl | `kubectl get pods` | 跟叢集講話的指令。`kubectl config set-context --current --namespace=foodgo` 之後不用每次打 `-n foodgo` |
+| 節點 node | `foodgo-control-plane`（一個 Docker 容器） | 跑 Pod 的機器。這一集只有一個 |
+| 控制平面 control plane | API server、etcd、scheduler、controller-manager（`kube-system` 裡） | 叢集的大腦：記住你要什麼（etcd）、決定 Pod 放哪個節點（scheduler）、一直把現況拉回你要的樣子（controller） |
+| namespace | `foodgo` | 叢集裡的一個隔間：整套 FoodGo 在裡面，`kubectl delete -k k8s/` 連隔間一起收掉 |
+| Pod | `kitchen-8b8765dc6-9g7l6` | K8S 排程的最小單位：一個（或幾個緊密合作的）容器＋自己的 IP。**Pod 是用完就丟的**：死了不會復活，是別人換一個新的 |
+| Deployment | `deployment/kitchen`（`replicas: 3`） | 「我要 N 個長這樣的 Pod」。管 ReplicaSet；改了樣子（映像檔、環境變數）就滾動更新 |
+| ReplicaSet | `kitchen-8b8765dc6`（Pod 名字的中間那段） | 維持「剛好 N 個同樣的 Pod」：少一個就補一個。Deployment 每改一次樣子就多一個 ReplicaSet，舊的留著給 `rollout undo` |
+| StatefulSet | `kafka-0`、`postgres-0` | 給有狀態的：Pod 名字固定、同一時間最多一個、接回同一顆硬碟 |
+| PersistentVolumeClaim（PVC） | `kafka-data`、`postgres-data`（1 GB） | 「我要一顆硬碟」。kind 內建的 local-path 在節點上開目錄給它；Pod 換了，資料還在 |
+| Service | `kitchen` → `http://kitchen:8000` | 一個固定的名字＋位址，流量平均分給「標籤對得上、而且就緒」的 Pod。Pod 換來換去，名字不變 |
+| NodePort | `gateway` 的 30080、`jaeger-ui` 的 30686 | 叢集外也連得到：節點的某個埠 → Service。kind 再用 `extraPortMappings` 把本機的 8000 接到節點的 30080 |
+| ConfigMap | `foodgo`（`k8s/config.yaml`） | 不是秘密的設定：用 `envFrom` 整包變成環境變數。值就是第 11 集 compose 的那些（`kafka:9092`、`http://jaeger:4318`…） |
+| Secret | `foodgo-db`（`k8s/secret.yaml`） | 秘密：密碼、連線字串。`data` 是 base64 **編碼**、不是加密，誰拿得到物件誰就看得到；正式環境的密碼不進 git |
+| kustomize | `k8s/kustomization.yaml`、`kubectl apply -k k8s/` | 把一堆 YAML 組成一份：統一放進 namespace、把 `image: foodgo` 換成 `foodgo:0.12.0`。kubectl 內建 |
+
+### 宣告式：檔案說了算
+
+**宣告式**（declarative）：檔案寫「要什麼」，`kubectl apply -k k8s/` 讓叢集變成那樣；沒變的物件顯示 `unchanged`。`kubectl scale`、`kubectl set env`、`kubectl rollout undo` 是**命令式**的臨時改法——下一次 `apply` 會照檔案改回來（第 12 集的 `kubectl scale deployment kitchen --replicas=3` 就被 apply 改回 1 過）。要留下來，就寫進檔案。
+
+| 指令 | 做什麼 |
+|---|---|
+| `kubectl kustomize k8s/` | 只印出組好的 YAML，不碰叢集 |
+| `kubectl diff -k k8s/` | 和叢集現在的比，會改哪裡 |
+| `kubectl apply -k k8s/` | 送進叢集 |
+| `kubectl get pods -w` | 看 Pod 的變化（`-w`：一直看下去） |
+| `kubectl describe pod <名字>` | 一個 Pod 的全部細節＋最近的事件（探針失敗、被砍、拉映像檔） |
+| `kubectl logs <Pod>`（`--previous`：上一個死掉的容器） | 容器的輸出 |
+| `kubectl exec <Pod> -- <指令>` | 在容器裡跑指令 |
+| `kubectl scale deployment kitchen --replicas=3` | 改個數（臨時的） |
+| `kubectl rollout status／history／undo deployment/kitchen` | 看滾動更新到哪、有哪些版本、退回上一版 |
+
+### 探針：活著嗎、可以接客了嗎
+
+| 探針 | FoodGo 問哪裡 | 失敗了 K8S 怎麼做 |
+|---|---|---|
+| 啟動探針 startupProbe | `/healthz`，2 秒一次、最多 30 次（60 秒） | 還在起來的時候不跑另外兩種；60 秒都沒成功 → 砍掉重開 |
+| 存活探針 livenessProbe | `/healthz`（背景工作停了 → 503），10 秒一次、連續 3 次 | **砍掉容器重開**（`RESTARTS` 加 1）——第 11 集 Docker 只會標 `unhealthy`，K8S 真的換掉它 |
+| 就緒探針 readinessProbe | `/readyz`（啟動做完、連得上資料庫）；Gateway 用 `/healthz` | **不重開**，只是先不把 Service 的流量給它（`READY 0/1`） |
+
+**CrashLoopBackOff**：容器一直結束、一直被重開，K8S 每次等久一點再重開（10 秒、20 秒、40 秒…最多 5 分鐘）。FoodGo 一 `apply` 就會看到：服務比 PostgreSQL、Kafka 先起來，啟動時連不上 → 程序結束 → 重開，2～3 次之後依賴好了就 `Running`。K8S 沒有 `depends_on`：**每個服務自己要撐得過「別人還沒好」**，重開就是重試。
+
+**同一則訊息弄倒每一個廚房**：`FOODGO_FAULT_KITCHEN=crash` 讓廚房處理 `AcceptTicket` 時當掉。這個 Pod 的 consumer 離開 group，partition 交給下一個廚房——它也有同樣的故障，也當掉；三個都被存活探針一再重開。**重開治得了「卡住」，治不了「每次都會壞的原因」**：要把壞的設定或程式換掉（`kubectl rollout undo`）。
+
+### 資源與擴展
+
+| 詞 | FoodGo | 意思 |
+|---|---|---|
+| requests | 廚房 `cpu: 50m`、`memory: 128Mi` | 排程用：節點上至少要空出這麼多才放得下（`m`＝千分之一顆 CPU） |
+| limits | 廚房 `cpu: 500m`、`memory: 256Mi` | 上限：CPU 超過就被拖慢；記憶體超過就被砍掉重開（`OOMKilled`） |
+| 擴展 scale | `kitchen` 3 個 Pod | `kitchen.commands` 有 3 個 partition，consumer group `kitchen` 的 3 個成員各分到一個；第 4 個會閒著 |
+| client.id | Pod 的名字（`socket.gethostname()`） | 0.12.0 起 consumer 用 Pod 的名字報到：`kafka-consumer-groups.sh --describe` 的 CLIENT-ID 一眼看出哪個 partition 在哪個 Pod |
+
+### 滾動更新
+
+**滾動更新**（rolling update）：Deployment 的樣子一改（`foodgo:0.11.0` → `foodgo:0.12.0`、多一個環境變數），就建一個新的 ReplicaSet，**先起一個新的、等它就緒、再停一個舊的**，一個一個換；全程都有就緒的 Pod 在接客。`kubectl rollout status deployment/kitchen` 看進度；**`kubectl rollout undo deployment/kitchen`** 退回上一版（舊的 ReplicaSet 還留著，換回去很快）。
+
+| 版本 | 映像檔 | 差在哪 |
+|---|---|---|
+| 0.11.0 | `foodgo:0.11.0`（第 11 集） | consumer 的 CLIENT-ID 都叫 `rdkafka` |
+| 0.12.0 | `foodgo:0.12.0` | consumer 用 Pod 的名字當 `client.id`；`foodgo.infra.service.VERSION`、`compose.yaml`、`k8s/kustomization.yaml` 的 `newTag` 一起改 |

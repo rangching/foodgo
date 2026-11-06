@@ -1,0 +1,89 @@
+# 點餐服務（第 10 集）：下單、查訂單、追蹤頁；背景工作 relay、ordering、saga（編排器）、tracking（投影）。
+# 長得和 kitchen.yaml 一樣（註解看那一份），只差 command、資料庫、故障開關與資源。
+apiVersion: v1
+kind: Service
+metadata:
+  name: ordering # Gateway 找 http://ordering:8000
+spec:
+  selector:
+    app: ordering
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ordering
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ordering
+  template:
+    metadata:
+      labels:
+        app: ordering
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ordering
+          image: foodgo
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "foodgo.services.ordering"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: foodgo
+          env:
+            - name: FOODGO_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: foodgo-db
+                  key: ordering
+            - name: FOODGO_SAGA_TIMEOUT # 編排器等回覆幾秒（第 8 集）
+              value: "3"
+            - name: FOODGO_SAGA_RETRIES
+              value: "1"
+            # 故障開關 FOODGO_FAULT_RELAY=crash-after-send：要的時候 kubectl set env（見 kitchen.yaml）
+          resources:
+            requests: # 四條背景工作，比其他服務多一點
+              cpu: 100m
+              memory: 160Mi
+            limits:
+              cpu: "1"
+              memory: 384Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

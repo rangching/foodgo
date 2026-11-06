@@ -1,0 +1,78 @@
+# PostgreSQL：一台、四個 database（foodgo_ordering…，服務啟動時自己建，第 10 集）。
+# 教學用的最簡版本：一份、沒有備份、沒有複本。正式環境用託管的資料庫或 operator（例如 CloudNativePG）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres # 服務連 postgres:5432（secret.env 裡的連線字串）
+spec:
+  selector:
+    app: postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+# 一顆 1 GB 的硬碟：kind 內建的 local-path 會在節點上開一個目錄給它。Pod 砍掉重建，接回來的還是這一顆。
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+# StatefulSet（不是 Deployment）：Pod 的名字固定（postgres-0），而且同一時間最多一個——
+# 舊的完全停了才起新的，不會有兩個 PostgreSQL 同時寫同一個資料目錄（Deployment 滾動更新會先起新的再停舊的）。
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      enableServiceLinks: false # 不要自動塞 <SERVICE>_PORT 這種環境變數（見 infra/kafka.yaml）
+      containers:
+        - name: postgres
+          image: postgres:17.11 # 和 compose.yaml 同一版
+          env:
+            - name: POSTGRES_USER
+              value: foodgo # 第一個使用者是 superuser：服務才能自己 CREATE DATABASE
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: foodgo-db
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              value: foodgo
+            - name: PGDATA # 放在掛載點底下的子目錄：掛進來的目錄不一定是空的
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe: # 接得了連線才把流量給它
+            exec:
+              command: ["pg_isready", "-U", "foodgo", "-d", "foodgo"]
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data

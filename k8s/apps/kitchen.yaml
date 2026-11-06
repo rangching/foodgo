@@ -1,0 +1,90 @@
+# 廚房服務（第 10 集）：聽 kitchen.commands、回覆到 kitchen.events；HTTP 有 /tickets。
+# 五個 FoodGo 的 Deployment 長得都一樣，只差 command、資料庫、故障開關——這一份註解寫得最完整，其他四份照抄。
+apiVersion: v1
+kind: Service
+metadata:
+  name: kitchen # Gateway 找 http://kitchen:8000（ConfigMap 的 FOODGO_KITCHEN_URL）
+spec:
+  selector:
+    app: kitchen # 流量給「標籤 app=kitchen、而且就緒」的 Pod，有幾個就平均分給幾個
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment # 「我要 N 個長這樣的 Pod」：少了就補、壞了就換、改了就一個一個換新的
+metadata:
+  name: kitchen
+spec:
+  replicas: 3 # kitchen.commands 有 3 個 partition：3 個 Pod 各分到一個（第 4 個會閒著）
+  selector:
+    matchLabels:
+      app: kitchen
+  template: # 每個 Pod 的樣子
+    metadata:
+      labels:
+        app: kitchen
+    spec:
+      enableServiceLinks: false # 不要自動塞 KAFKA_PORT 這種環境變數（見 infra/kafka.yaml）
+      securityContext: # 非 root：映像檔本來就是 USER 10001（第 11 集），這裡再要求一次，是 root 就不准起
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kitchen
+          image: foodgo # tag 由 k8s/kustomization.yaml 的 images 決定（foodgo:0.12.0 這種）
+          imagePullPolicy: IfNotPresent # 用 kind load 載進來的那一份，不去 registry 拉
+          command: ["python", "-m", "foodgo.services.kitchen"] # 一個映像檔、五個 Deployment：只差這一行
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: foodgo # 通訊錄：kafka:9092、http://jaeger:4318…
+          env:
+            - name: FOODGO_DATABASE_URL # 自己的資料庫（含密碼）：從 Secret 拿
+              valueFrom:
+                secretKeyRef:
+                  name: foodgo-db
+                  key: kitchen
+            - name: FOODGO_KITCHEN_SLOW_SECONDS # FOODGO_FAULT_KITCHEN=slow 時慢幾秒（第 8 集）
+              value: "4"
+            # 故障開關 FOODGO_FAULT_KITCHEN（reject／slow／crash）不寫在這裡：要的時候
+            #   kubectl set env deployment/kitchen FOODGO_FAULT_KITCHEN=crash   # 換成會當掉的廚房（滾動更新）
+            #   kubectl rollout undo deployment/kitchen                          # 換回上一版
+          resources:
+            requests: # 排程用：節點上至少要空出這麼多才放得下這個 Pod
+              cpu: 50m
+              memory: 128Mi
+            limits: # 上限：CPU 超過就變慢；記憶體超過就被砍掉重開（OOMKilled）
+              cpu: 500m
+              memory: 256Mi
+          # 三種探針都問 HTTP。服務啟動（建資料庫、建表、建 topic）做完之前 uvicorn 還沒開始聽，連不上＝失敗。
+          startupProbe: # 起得來嗎：最多等 60 秒（2 秒一次 × 30 次）；這段時間不跑另外兩種探針
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe: # 活著嗎：背景工作停了 /healthz 就 503；連續 3 次（30 秒）→ 砍掉容器重開
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe: # 可以接客了嗎：/readyz 不是 200 就先不把流量給它（不重開）
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true # 程式不寫檔：整個檔案系統唯讀
+            capabilities:
+              drop: ["ALL"]

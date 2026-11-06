@@ -1,0 +1,13 @@
+# Kafka UI：要看 topic、consumer group 的時候才裝（多吃約 0.4 GB 記憶體），看完就刪。
+#
+#   kubectl apply -k k8s/kafka-ui      # 等它就緒後打開 http://127.0.0.1:28080
+#   kubectl delete -k k8s/kafka-ui
+#
+# 不在 k8s/kustomization.yaml 裡：kubectl apply -k k8s/ 不會裝它，也不會刪它。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: foodgo
+
+resources:
+  - kafka-ui.yaml

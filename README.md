@@ -336,3 +336,57 @@ docker image rm foodgo:0.11.0            # 刪掉映像檔（下次 --build 再�
 ```
 
 第 10 集的本機五個程序（`uv run python demos/ep10_services.py up`）和這一集的容器用同一組 topic、consumer group 名字與 Gateway 埠 8000，**不要同時開**。
+
+## 交給 K8S 調度：kind 叢集（第 12 集）
+
+第 12 集把整套 FoodGo 部署到本機的 Kubernetes（kind：每個節點是一個 Docker 容器）。要先裝 kind 與 kubectl（`brew install kind kubectl`），Docker 至少給 4 GB 記憶體。第 11 集的容器先收掉（`docker compose --profile app down -v`）：Gateway 一樣用本機的 8000。
+
+```bash
+kind create cluster --config kind-config.yaml        # 一個節點的叢集 foodgo（kubectl 的 context 是 kind-foodgo）
+docker build -t foodgo:0.12.0 .                      # 映像檔（tag 跟著 foodgo.infra.service.VERSION）
+kind load docker-image foodgo:0.12.0 --name foodgo   # 載進叢集：不經過 registry
+kubectl config set-context --current --namespace=foodgo
+kubectl apply -k k8s/                                # 整套：Kafka、PostgreSQL、Jaeger＋五個 FoodGo
+kubectl get pods -w                                  # 等到全部 1/1 Running（服務會先 CrashLoopBackOff 兩三次，等 Kafka 與 PostgreSQL 好了就好）
+```
+
+| 網址 | 看什麼 |
+|---|---|
+| <http://127.0.0.1:8000/services> | Gateway（NodePort 30080 → 本機 8000）問四個服務的 `/healthz` |
+| <http://127.0.0.1:26686/search?service=gateway> | Jaeger UI（NodePort 30686 → 本機 26686）：下單 A001，一條 trace、5 個服務、27 個 span |
+| <http://127.0.0.1:28080> | Kafka UI：要的時候才裝 `kubectl apply -k k8s/kafka-ui`（多吃約 0.4 GB），看完 `kubectl delete -k k8s/kafka-ui` |
+
+`k8s/` 的內容（`kubectl kustomize k8s/` 印出組好的全部）：
+
+| 檔案 | 裡面有什麼 |
+|---|---|
+| `kustomization.yaml` | 把下面這些組起來、全部放進 namespace `foodgo`、`image: foodgo` 換成 `foodgo:0.12.0`（版本只寫這裡） |
+| `config.yaml` | ConfigMap `foodgo`：`kafka:9092`、`http://jaeger:4318`、`http://ordering:8000`…（和第 11 集 compose 一模一樣） |
+| `secret.yaml` | Secret `foodgo-db`：PostgreSQL 的密碼、四個服務各自的 `FOODGO_DATABASE_URL`（base64，練習用的假密碼） |
+| `infra/` | `postgres`、`kafka`（StatefulSet＋1 GB 的 PVC）、`jaeger`（Deployment；UI 在 NodePort 30686）——教學用的最簡版本 |
+| `apps/` | 五個 Deployment＋Service：`python -m foodgo.services.<名字>`、非 root（10001）、唯讀檔案系統、requests／limits、三種探針；廚房 3 個 |
+| `kafka-ui/` | 另外裝的 Kafka UI |
+
+常用的：
+
+```bash
+kubectl scale deployment kitchen --replicas=3                        # 臨時改個數（下次 apply 會照檔案改回來）
+kubectl delete pod <廚房的 Pod>                                        # 看它被補回來
+kubectl exec kafka-0 -- /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 --describe --group kitchen
+kubectl set env deployment/kitchen FOODGO_FAULT_KITCHEN=crash        # 換成會當掉的廚房：下一張單後存活探針一直重開它
+kubectl rollout undo deployment/kitchen                              # 退回上一版
+kubectl rollout status deployment/kitchen
+```
+
+滾動更新到新版本：改 `foodgo.infra.service.VERSION`、`compose.yaml` 的 `image`、`k8s/kustomization.yaml` 的 `newTag` → `docker build -t foodgo:<新版> .` → `kind load docker-image foodgo:<新版> --name foodgo` → `kubectl apply -k k8s/`。
+
+記憶體：整個 kind 節點約 2 GB（Kubernetes 自己約 0.9 GB、Kafka 約 480 MB、PostgreSQL 約 70 MB、七個 FoodGo 的 Pod 各約 55～60 MB）。
+
+收拾：
+
+```bash
+kind delete cluster --name foodgo       # 整個叢集（連資料）一起刪
+docker image rm foodgo:0.11.0 foodgo:0.12.0
+```
+
+叢集測試（`tests/ep12/test_ep12_cluster.py`，標 `kind`）要叢集開著才會跑；沒有叢集時自動略過。叢集名字不是 `foodgo` 的話設 `FOODGO_KIND_CLUSTER`。

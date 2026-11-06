@@ -1,0 +1,85 @@
+# 付款服務（第 10 集）：聽 payment.commands、回覆到 payment.events；沒有對外的 API。
+# 長得和 kitchen.yaml 一樣（註解看那一份），只差 command、資料庫、故障開關。
+apiVersion: v1
+kind: Service
+metadata:
+  name: payment # Gateway 的 /services 問 http://payment:8000/healthz
+spec:
+  selector:
+    app: payment
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payment
+  template:
+    metadata:
+      labels:
+        app: payment
+    spec:
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: payment
+          image: foodgo
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "foodgo.services.payment"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: foodgo
+          env:
+            - name: FOODGO_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: foodgo-db
+                  key: payment
+            # 故障開關 FOODGO_FAULT_PAYMENT=decline、FOODGO_FAULT_REFUND=fail：要的時候 kubectl set env（見 kitchen.yaml）
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

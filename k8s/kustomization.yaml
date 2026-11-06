@@ -1,0 +1,32 @@
+# 第 12 集：整套 FoodGo 交給 Kubernetes。kustomize 把下面這些檔案組成一份，kubectl 內建：
+#
+#   kubectl kustomize k8s/         # 只印出組好的 YAML（不碰叢集），先看看會送出什麼
+#   kubectl diff -k k8s/           # 和叢集裡現在的比，會改哪些地方
+#   kubectl apply -k k8s/          # 送進叢集：沒有的建、有的照檔案改、沒變的不動（unchanged）
+#   kubectl delete -k k8s/         # 全部刪掉（連 namespace，Kafka 與資料庫的資料一起清）
+#
+# 基礎設施（Kafka、PostgreSQL、Jaeger）也一起跑在叢集裡——教學用的最簡版本：一份、沒有備份、沒有監控。
+# 正式環境多半用雲端的託管服務（RDS、MSK…），或叢集裡用 operator（Strimzi、CloudNativePG）管。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: foodgo # 下面每個物件都放進 foodgo 這個 namespace
+
+resources:
+  - namespace.yaml
+  - config.yaml # ConfigMap：容器之間的通訊錄（不是秘密）
+  - secret.yaml # Secret：資料庫的密碼與連線字串
+  - infra/postgres.yaml
+  - infra/kafka.yaml
+  - infra/jaeger.yaml
+  - apps/gateway.yaml
+  - apps/ordering.yaml
+  - apps/payment.yaml
+  - apps/kitchen.yaml
+  - apps/delivery.yaml
+
+# FoodGo 的映像檔版本只寫在這裡：五個 Deployment 都寫 image: foodgo，kustomize 換成 foodgo:<newTag>。
+# 跟著 foodgo.infra.service.VERSION；滾動更新＝改這一行、重建映像檔、kind load、再 apply。
+images:
+  - name: foodgo
+    newTag: 0.12.0

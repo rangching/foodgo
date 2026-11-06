@@ -1,4 +1,5 @@
 """Kafka 的薄薄一層（confluent-kafka）：建 topic、送訊息、以 consumer group 收訊息。"""
+import socket
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -107,6 +108,7 @@ def consume(
         {
             "bootstrap.servers": bootstrap or config.kafka_bootstrap(),
             "group.id": group,
+            "client.id": socket.gethostname(),  # 第 12 集：K8S 裡＝Pod 的名字，describe 一眼看出哪個 partition 分給哪個 Pod
             "enable.auto.commit": False,  # 自己決定什麼時候提交
             "auto.offset.reset": "earliest",  # 新的 group 從最舊的訊息開始讀
             "session.timeout.ms": 6000,  # 成員當掉 6 秒沒心跳，partition 就交給別人
