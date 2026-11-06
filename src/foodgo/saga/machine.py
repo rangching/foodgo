@@ -12,6 +12,7 @@
 每一步送出命令就開始計時；逾時重送一次（Settings.retries），還是沒回覆就放棄這一步、開始補償。
 放棄的那一步「結果不確定」（也許對方其實做了，只是很慢）：它的補償照送，但不等回覆——
 命令 topic 照順序，補償一定排在原本的命令後面，對方回來之後會先做、再撤銷。
+補償也失敗、只好交給人（needs_attention）時，對外公告一則 SagaEscalated（第 9 集：追蹤頁要顯示「人工處理中」）。
 """
 import os
 from dataclasses import dataclass, field
@@ -111,6 +112,7 @@ class OrderSaga:
     version: int = 0  # 存了幾次（樂觀鎖用）
     _sent: list[contracts.Command] = field(default_factory=list, repr=False)
     _log: list[Entry] = field(default_factory=list, repr=False)
+    _announced: list[contracts.IntegrationEvent] = field(default_factory=list, repr=False)  # 第 9 集
 
     # ------------------------------------------------------------ 外面呼叫的三個入口
     def receive(self, message: contracts.IntegrationEvent, now: datetime, settings: Settings) -> None:
@@ -157,6 +159,11 @@ class OrderSaga:
         sent, log = self._sent, self._log
         self._sent, self._log = [], []
         return sent, log
+
+    def pull_announcements(self) -> list[contracts.IntegrationEvent]:
+        """取走要對外公告的事件（第 9 集：只有 SagaEscalated）。和命令一樣寫進 saga_outbox，同一個交易。"""
+        announced, self._announced = self._announced, []
+        return announced
 
     # ------------------------------------------------------------ 出發前：收齊點餐的事實
     def _note_fact(self, message: contracts.IntegrationEvent, now: datetime, settings: Settings) -> None:
@@ -244,6 +251,8 @@ class OrderSaga:
         self.state = SagaState.NEEDS_ATTENTION
         self._stop_waiting()
         self._write("give_up", "", f"要人工處理：{why}")
+        # 第 9 集：「我放棄了、要人接手」只有編排器知道，公告出去（追蹤頁、客服都聽得到）
+        self._announced.append(contracts.SagaEscalated(order_id=self.saga_id, reason=why))
 
     # ------------------------------------------------------------ 送命令、計時
     def _send(self, command: str, now: datetime, settings: Settings, *, action: str) -> None:

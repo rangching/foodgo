@@ -111,3 +111,32 @@ source_modules =
     foodgo.infra
 forbidden_modules =
     foodgo.saga
+
+[importlinter:contract:tracking]
+name = 讀模型只吃共同語言
+type = forbidden
+source_modules =
+    foodgo.tracking
+forbidden_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.shared
+    foodgo.saga
+    foodgo.app
+
+[importlinter:contract:writers]
+name = 寫入端不知道誰在讀
+type = forbidden
+source_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.shared
+    foodgo.contracts
+    foodgo.infra
+    foodgo.saga
+forbidden_modules =
+    foodgo.tracking

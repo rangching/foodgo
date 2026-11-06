@@ -1,6 +1,7 @@
 """saga 存在 PostgreSQL：sagas（現在走到哪）、saga_log（每一步、每個補償）、saga_outbox（要送的命令）。
 
 一則回覆進來＝一個交易：記帳（processed_messages）＋改 sagas＋寫 saga_log＋命令寫進 saga_outbox。
+第 9 集起，放棄時公告的 SagaEscalated 也寫進 saga_outbox（送到 saga.events），同一個交易。
 編排器當掉重啟，從 sagas 接著做；逾時看 deadline 欄位，不靠記憶體裡的計時器。
 """
 from collections.abc import Mapping
@@ -47,13 +48,15 @@ OUTBOX = "saga_outbox"  # 編排器要送的命令先寫這裡，consumer 再送
 SCHEMAS = (SCHEMA, outbox.schema(OUTBOX), inbox.SCHEMA)
 
 CONSUMER = "saga"  # processed_messages 裡用這個名字記帳
+# 送到哪：命令照接收者（receiver）送到它的命令 topic；編排器自己公告的事件（第 9 集）送到 "saga" 那一條
+TOPICS = {**contracts.COMMAND_TOPICS, "saga": contracts.SAGA_TOPIC}
 COLUMNS = "saga_id, state, data, waiting_for, attempts, deadline, done, todo, reason, version"
 
 
 class PostgresSagaRepository:
-    def __init__(self, url: str, *, topics: Mapping[str, str] = contracts.COMMAND_TOPICS) -> None:
+    def __init__(self, url: str, *, topics: Mapping[str, str] = TOPICS) -> None:
         self._url = url
-        self._topics = dict(topics)  # 接收者 → 命令 topic（測試換成臨時的 topic）
+        self._topics = dict(topics)  # 接收者 → 命令 topic，"saga" → 編排器的事件 topic（測試換成臨時的 topic）
 
     def change(self, saga_id: str, apply: Apply, *, message_id: str | None = None) -> OrderSaga | None:
         with psycopg.connect(self._url) as conn:  # 一個交易：一起成功、一起失敗
@@ -91,6 +94,8 @@ class PostgresSagaRepository:
             )
             for command in commands:
                 outbox.put(conn, topic=self._topics[command.receiver], key=saga.saga_id, message=command, table=OUTBOX)
+            for event in saga.pull_announcements():
+                outbox.put(conn, topic=self._topics["saga"], key=saga.saga_id, message=event, table=OUTBOX)
         return saga
 
     def get(self, saga_id: str) -> OrderSaga | None:

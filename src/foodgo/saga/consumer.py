@@ -4,6 +4,7 @@
 
 聽：ordering.events、payment.events、kitchen.events、delivery.events（consumer group saga）。
 發：ordering.commands、payment.commands、kitchen.commands、delivery.commands（先寫 saga_outbox，處理完一則就送出去）。
+第 9 集起也發 saga.events：放棄、轉人工處理時的 SagaEscalated。
 FOODGO_SAGA_TIMEOUT＝等回覆幾秒（預設 3）；FOODGO_SAGA_RETRIES＝逾時或退款失敗後再送幾次（預設 1）。
 """
 from collections.abc import Sequence
@@ -51,7 +52,7 @@ def run(
 def main() -> None:
     url = config.database_url()
     db.create_tables(url, *SCHEMAS)
-    for topic in (*LISTENS, *contracts.COMMAND_TOPICS.values()):
+    for topic in (*LISTENS, *contracts.COMMAND_TOPICS.values(), contracts.SAGA_TOPIC):
         kafka.ensure_topic(topic)
     settings = Settings.from_environment()
     orchestrator = Orchestrator(PostgresSagaRepository(url), settings)

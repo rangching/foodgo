@@ -155,6 +155,7 @@
 | `PaymentRefunded` v1（第 8 集） | 付款 | 編排器 | `order_id`、`payment_id`、`amount`（退了多少元；沒扣到款是 0） | 卡號、退款編號：留在付款的防腐層裡 |
 | `RefundFailed` v1（第 8 集） | 付款 | 編排器 | `order_id`、`payment_id`、`reason` | 金流服務的錯誤碼 |
 | `TicketCancelled` v1（第 8 集） | 廚房 | 編排器 | `order_id`、`ticket_id`、`reason` | 菜名、備註 |
+| `SagaEscalated` v1（第 9 集） | 編排器（`saga.events`） | 追蹤頁（之後：客服） | `order_id`、`reason`（為什麼放棄） | saga 自己的帳（`done`、`todo`、`attempts`）：那是編排器內部的事 |
 
 `OrderCancelled` 第 8 集起放進共同語言：編排器要知道「訂單取消了」才算補償做完，第 9 集的追蹤頁也要聽。付款要金額、外送要地址時也照同一條原則：第 7 集選了「另發事件」，理由見「付款要金額、外送要地址：放在哪」。
 
@@ -309,7 +310,7 @@ Order 的每個動作對應一個事件，照順序套上去就能算回整張�
 
 | 欄位 | 意思 |
 |---|---|
-| `position` | `bigserial`：所有事件流排在同一條線上的第幾個（第 9 集投影照這個順序讀） |
+| `position` | `bigserial`：所有事件流排在同一條線上的第幾個（第 9 集的投影改從 Kafka 讀，沒有用它：見「讀模型從哪裡重建」） |
 | `stream_id`、`version` | 哪一條事件流（訂單編號）、第幾個事件；`UNIQUE (stream_id, version)`：同一條流不會有兩個第 5 版 |
 | `event_id` | 事件自己的編號（`UNIQUE`）；整合事件沿用它，廚房用它判重 |
 | `type`、`data` | 事件名稱與內容（`jsonb`）。基礎設施只認這兩個，不認識事件類別 |
@@ -615,3 +616,146 @@ stateDiagram-v2
 | `FOODGO_FAULT_REFUND=fail` | 付款 consumer | 退款都失敗 → `RefundFailed` → 重試 → 還是失敗 → `needs_attention` |
 | `FOODGO_SAGA_TIMEOUT=3`、`FOODGO_SAGA_RETRIES=1` | 編排器 | 等回覆幾秒、逾時（或退款失敗）後再送幾次 |
 | `FOODGO_SAGA=choreography` | 付款、廚房、外送 consumer | 換回第 7 集的接力 |
+
+## 讀寫分家（第 9 集：CQRS 與投影）
+
+### 寫模型、讀模型
+
+**CQRS**（Command Query Responsibility Segregation，命令與查詢分開）：改東西和看東西走不同的模型。寫入端專心守規則，讀取端專心服務畫面。不一定要兩個資料庫——這一集是同一個 PostgreSQL、不同的表；讀取端只吃事件，所以第 10 集要搬到哪裡都可以。
+
+| | 寫模型（第 2～8 集） | 讀模型（第 9 集） |
+|---|---|---|
+| 為了什麼 | 守規則：不能空單、送出後不能改、付款前不能做菜、補償要照順序 | 服務畫面：一次查完，畫面要什麼欄位就有什麼 |
+| 長什麼樣 | `Order` 聚合＋`events` 表；付款、廚房、外送各自的表；編排器的 `sagas` | 一張扁平的表 `order_tracking`：一張訂單一列 |
+| 誰寫 | 各上下文處理命令的地方（API、consumer） | 只有投影 consumer |
+| 「A001 走到哪了」 | 拼四個上下文的表（第 7 集的 `trace`），或問編排器（第 8 集的 `sagas`） | `SELECT * FROM order_tracking WHERE order_id = 'A001'`：一列 |
+| 壞了怎麼辦 | 不能壞：那就是事實本身 | 砍掉，從事件重建 |
+| 一致性 | 交易裡立刻一致 | **最終一致**：比寫入端晚一點點 |
+
+### 詞
+
+| 詞 | 程式／例子 | 意思 |
+|---|---|---|
+| 寫模型 | `Order`、`events`、`payments`、`tickets`、`deliveries`、`sagas` | 守規則的那一邊：命令進來，檢查、改狀態、公告事件 |
+| 讀模型 read model | `order_tracking` | 為一個畫面排好的資料。只由投影寫；誰都不能直接改它 |
+| 投影 projection | `foodgo.tracking.projection.apply(追蹤, 事件)` | 一則事件 → 讀模型的一列變成什麼樣子。純函式，和第 5 集的 `evolve` 同一個形狀 |
+| 投影 consumer | `python -m foodgo.tracking.consumer`（consumer group `tracking`） | 聽五條事件 topic：`ordering.events`、`payment.events`、`kitchen.events`、`delivery.events`、`saga.events`。一則訊息一個交易 |
+| 讀到哪 | `projection_positions`（`projection`、`topic`、`partition`、`last_offset`） | 每個 partition 處理到第幾則。和讀模型寫在同一個交易：要嘛一起成功、要嘛一起沒發生 |
+| `as_of_position` | API 回應裡的一個數字 | 投影一共處理了幾則訊息：這份資料「新到哪裡」。數字越大越新 |
+| 最終一致 eventual consistency | 剛下單就查追蹤：404 | 寫入成功了，讀模型還沒跟上（relay 每 0.5 秒送一次、投影再讀）。等一下就有 |
+| 冪等 | 同一則事件套兩次 | 結果和套一次一樣。Kafka 至少送一次、參與者被重送命令時會「再回一次」，投影一定要冪等 |
+| 不管順序 | 五條 topic 誰先到不一定 | 付款的事件可能比點餐的先到；重建時十五個 partition 一起讀，更是亂。套完的結果要一樣 |
+| 重建 rebuild | `python -m foodgo.tracking.rebuild` | 清空 `order_tracking`、忘記讀到哪（同一個交易），再從 Kafka 每個 partition 的第一則重播。前後的指紋（md5）一樣＝資料一模一樣 |
+| 人工處理中 | `SagaEscalated` → `needs_attention` | 編排器補償不下去、交給人了。追蹤頁顯示「人工處理中」 |
+
+### `order_tracking` 一列有什麼
+
+| 欄位 | 誰說的（哪一則事件） | 為什麼要這一欄 |
+|---|---|---|
+| `order_id` | 每一則都有 | 一張訂單一列：畫面用訂單編號查 |
+| `status` | 由下面的事實推出來（不另外記） | 狀態條上方那個大字；存起來是給 `WHERE status = …` 與看板用 |
+| `restaurant_id`、`items`、`note` | `OrderPlaced` | 「你點了什麼」。`items` 是 jsonb：畫面一次拿走，不用再 JOIN 品項表 |
+| `amount` | `PaymentRequested` | 合計 230 元。點餐的 `Order` 也算得出來，但讀取端不去問寫入端 |
+| `delivery_address` | `DeliveryRequested` | 送到哪 |
+| `placed_at` | `OrderPlaced` 發生的時間 | 下單時間；`NULL`＝點餐的事件還沒到（別的 topic 先到了） |
+| `payment`、`payment_id`、`payment_reason`、`refunded` | `PaymentAuthorized`、`PaymentFailed`、`RefundFailed`、`PaymentRefunded` | 付款那一格：付了、失敗、退款失敗、退了多少 |
+| `kitchen`、`ticket_id`、`kitchen_reason` | `TicketAccepted`、`TicketRejected`、`MealReady`、`TicketCancelled` | 廚房那一格：接單、拒單、出餐、撤銷 |
+| `delivery`、`delivery_id`、`courier_id` | `CourierAssigned` | 外送那一格：哪位外送員 |
+| `cancelled` | `OrderCancelled` 的理由 | 「已取消：餐廳拒單：餐廳太忙，暫停接單」 |
+| `attention` | `SagaEscalated` 的理由 | 「人工處理中」 |
+| `updated_at` | 套過的事件裡**最晚發生**的那一則的時間 | 畫面上的「資料時間」。刻意不用「寫進來的時間」：那樣重建之後每一列都不一樣，就比不出「一模一樣」 |
+
+沒有的欄位也是決定：顧客編號（畫面用不到，個資少放）、價格明細（點餐自己有）、外送員電話（還沒有人公告）。
+
+### 冪等、不管順序：先記事實再推進
+
+和第 7 集廚房、外送「先記事實再推進」同一招：
+
+- 每一欄只記**事實**（付了、拒單了、退款了），不記「下一步要做什麼」。
+- 同一個階段的事實有**排名**，排名高的蓋過排名低的，反過來不會：
+  付款 `''` → `authorized` → `failed` → `refund_failed` → `refunded`；廚房 `''` → `accepted` → `rejected` → `ready` → `cancelled`。
+  遲到的「已接單」（第 8 集廚房當機、修好之後才回）蓋不掉「已撤銷」。
+- 兩則事件記同一欄（例如 `restaurant_id`）：有值的蓋過沒值的；`placed_at` 取早的、`updated_at` 取晚的。
+- **整體狀態由事實推出來**：有 `cancelled` → 已取消；有 `attention` → 人工處理中；付款失敗、退款了、拒單、撤銷 → 取消中；有外送員 → 外送中；接單了 → 製作中；付了 → 已付款；其他 → 已下單。
+
+這樣每一欄都是「取大的」：同一則套兩次（冪等）、換個順序套（不管順序），結果都一樣。`tests/ep09/test_ep09_projection.py` 把每個情境的事件倒過來、洗牌 50 次，每次都比一遍。
+
+### 讀到哪：記在讀模型旁邊
+
+投影 consumer 和第 4 集的廚房 consumer 不一樣，不用 `processed_messages`（照 `event_id` 記），改用 `projection_positions`（每個 partition 一列，記 `last_offset`）：
+
+| | `processed_messages`（第 4 集起，有副作用的 consumer） | `projection_positions`（第 9 集，投影） |
+|---|---|---|
+| 記什麼 | 每一則處理過的 `event_id` | 每個 partition 處理到第幾則 |
+| 會不會越長越大 | 會 | 不會：五條 topic × 3 個 partition，最多 15 列 |
+| 從哪裡讀起 | Kafka 的 consumer group 記的位置 | 自己記的位置：分到 partition 時從 `last_offset + 1` 讀起（`kafka.consume(start_at=…)`）。Kafka 那邊的位置只拿來看 lag |
+| 重建要做什麼 | 清表＋去 Kafka 重設 consumer group 的位置（兩個地方、兩個系統） | 清表＋清位置，**同一個交易**；投影自己就會從頭讀 |
+| 讀模型新到哪 | 說不出來 | `as_of_position`＝每個 partition 的 `last_offset + 1` 加起來 |
+
+同一件事被送了兩次、而且 offset 不同（relay 重送、參與者「再回一次」），擋下來的是投影本身的冪等，不是這張表。
+
+### 讀模型從哪裡重建：Kafka，不是 `events` 表
+
+第 6 集留了一個問題：投影要照全域順序讀，`events` 表的 `position`（`bigserial`）依 INSERT 配號、依 COMMIT 才看得到，輪詢 `position > 上次` 可能漏掉較早配號、較晚 COMMIT 的列。這一集的選擇是**投影改吃 Kafka**：
+
+1. **事實不都在 `events` 表裡**：`events` 只有點餐的事件流（`OrderDrafted`、`ItemAdded`、`OrderPlaced`、`OrderCancelled`）。付款、廚房、外送、編排器的事實只在它們公告的 Kafka topic 上——從 `events` 重播，追蹤頁只會剩下「已下單」。
+2. **沒有漏讀的問題**：同一個 partition 裡，offset 照寫入的順序排、照順序看得到。
+3. **第 10 集拆服務**：每個服務自己的資料庫，讀取端本來就讀不到點餐的 `events` 表；它只認公告出來的事件。
+
+代價：Kafka 上的 `*.events` 變成讀模型的「原始資料」，保留多久就決定了能重建多久以前的資料。本機的 Kafka 用預設的 7 天（`log.retention.hours=168`），練習夠用；正式上線要把這些 topic 設成不過期（`retention.ms=-1`），或另外歸檔。**不能用 compaction**：同一個 key 只留最後一則，投影就看不到前面的事實。
+
+### 「人工處理中」怎麼顯示：讓編排器公告 `SagaEscalated`
+
+第 8 集的編排器不公告事件：`needs_attention` 只寫在 `sagas`、`saga_log`。三條路：
+
+| 做法 | 好處 | 為什麼不選 |
+|---|---|---|
+| **編排器公告一則 `SagaEscalated`（選這個）** | 「我放棄了，要人接手」本來就是一件業務上的事實（客服、通知也會想聽）；投影照樣只吃事件，從 Kafka 重建時也重建得出來 | 要多一條 topic `saga.events`，改一點第 8 集的程式 |
+| 投影另外讀 `sagas` 表 | 第 8 集的程式不用動 | 讀取端偷看別人的表：第 10 集每個服務自己的資料庫就斷了；`sagas` 是「現在的樣子」不是事件，重建時重播不出來 |
+| 這一集不顯示 | 最省事 | 退款一直失敗的那張單，顧客只看到「取消中」一直轉——最需要說清楚的時候反而沒說 |
+
+- 編排器只公告這一則：其他事實（付了、拒單、退款了、取消了）參與者都公告了，不重複說。
+- 名字是過去式：「已轉人工處理」。`reason` 是放棄的理由，例如「RefundPayment 試了 2 次都失敗（發卡銀行暫時無法退款）」。
+- 寫進 `saga_outbox`，和改 `sagas`、寫 `saga_log` 同一個交易；送到 `saga.events`（和別人一樣：`<發布者>.events`）。
+- 投影**不自己猜**「要人工處理了沒」：退款失敗一次時編排器還會重試，追蹤頁照樣是「取消中」；編排器說放棄了，才變「人工處理中」。
+
+### 最終一致：畫面怎麼處理
+
+剛下單就查追蹤，一定會遇到讀模型還沒有：
+
+```
+POST /orders → events＋outbox（commit）→ relay（最多等 0.5 秒）→ ordering.events → 投影 consumer → order_tracking
+```
+
+- **API**：`GET /orders/{id}/tracking` 查不到回 **404**、`Retry-After: 1`，內容帶 `as_of_position`（投影新到哪）。不去問點餐「這張單存不存在」：讀取端不依賴寫入端，寫入端忙的時候也查得動。
+- **畫面**：`/track/{id}` 查到 404 就顯示「更新中…」、一秒後再查；之前查到過的資料先留著（例如正在重建時）。下方一直顯示「資料時間」（最晚那一則事件的時間）與 `as_of_position`。
+- **寫入端的回應照樣是真的**：`POST /orders` 回 201 時訂單已經存好了；`GET /orders/{id}`（寫模型）馬上查得到——顧客要的「進度」才去讀模型查。
+
+| 網址 | 回什麼 |
+|---|---|
+| `GET /orders/{order_id}/tracking` | JSON：`status`、`status_label`、`headline`、`steps`（四格：`key`、`title`、`state`、`detail`）、品項、金額、地址、各上下文的編號、`updated_at`、`as_of_position` |
+| `GET /track/{order_id}` | 追蹤頁（HTML）：每秒查一次上面那個 API，畫步驟條 |
+
+步驟條每一格的 `state`：`done`（做完：上下文的顏色）、`active`（進行中：外框閃）、`failed`（失敗：紅）、`undone`（補償了：虛線＋刪除線，例如「已退款 230 元」）、`todo`（還沒輪到）、`skipped`（不會做了）。
+
+### 讀取端放在哪：`foodgo/tracking/`
+
+- 和編排器一樣**不是限界上下文**：沒有規則要守，只把別人公告的事實排成畫面要的樣子。只吃共同語言（`foodgo.contracts`）。
+- 第 10 條邊界規則「讀模型只吃共同語言」：`foodgo.tracking` 不能 import 四個上下文、共用核心、編排器、組裝點。
+- 第 11 條「寫入端不知道誰在讀」：四個上下文、共用核心、共同語言、基礎設施、編排器都不能 import `foodgo.tracking`。
+- 擁有兩張表：`order_tracking`、`projection_positions`（讀到哪；練習的看板投影也記在這裡，用自己的 `projection` 名字）。不 JOIN 任何上下文的表，所以第 10 集可以跟點餐服務放一起、也可以自己一個服務、自己一個資料庫。
+- 記憶體版（`create_app()`，第 3 集的匯流排）：投影就是匯流排上另一個訂閱者，收到 `OrderPlaced` 就投影、沒有延遲。
+
+### 重建：砍掉讀模型、從事件重來
+
+```bash
+# 先停掉投影 consumer（Ctrl-C）；還開著的話，重建會拒絕
+uv run python -m foodgo.tracking.rebuild
+```
+
+1. 記下現在的樣子：列數＋整張表的 md5（`md5(string_agg(t::text, '|' ORDER BY order_id))`）。
+2. 一個交易：`DELETE FROM order_tracking`、清掉 `projection_positions` 裡 `order_tracking` 的那幾列。
+3. 重播：五條 topic 的每個 partition 從第一則讀到「現在最新」（開始時先問好 high watermark，讀到就停；不加入 consumer group）。
+4. 再算一次 md5：一樣＝重建出來的資料一模一樣。之後照常起投影 consumer，它從記好的位置接著讀。
+
+能這樣做，靠的是三件事：事件還在（Kafka 的保留時間）、投影是純函式（同樣的事件一定算出同樣的列）、讀模型裡沒有「寫進來的時間」這種每次都不一樣的欄位。讀模型被改壞了、欄位要改、要加一個新畫面——都是砍掉重建。

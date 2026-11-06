@@ -189,3 +189,47 @@ docker compose exec -e PGTZ=Asia/Taipei postgres psql -U foodgo -c "SELECT id, t
 | `FOODGO_SAGA=choreography` | 付款、廚房、外送 consumer | 換回第 7 集的接力（要換先 `docker compose down -v`：同一個 consumer group 換 topic 會從頭讀） |
 
 第 7 集的 `FOODGO_FAULT_PAYMENT=decline`、`FOODGO_FAULT_KITCHEN=reject|crash` 照用，現在編排器會接手補償。
+
+## 讀寫分家：訂單追蹤（第 9 集）
+
+第 9 集起多了**讀取端**（`foodgo.tracking`）：投影 consumer 聽五條事件 topic（四個上下文的 `*.events`，加上編排器的 `saga.events`），把一張訂單的進度排成 `order_tracking` 的一列；追蹤 API 與追蹤頁只讀這張表。
+
+一條指令跑一個情境（會自己起第 8 集那六個程序＋投影，下一張新的單，一直查追蹤到走完）：
+
+```bash
+uv run python demos/ep09_tracking.py              # 下單後馬上查：404 更新中… → 已下單 → … → 外送中
+uv run python demos/ep09_tracking.py slow         # 廚房想 2 秒才回：追蹤頁看得到一格一格亮起來
+uv run python demos/ep09_tracking.py decline      # 付款失敗 → 已取消
+uv run python demos/ep09_tracking.py reject       # 餐廳拒單 → 退款 → 已取消
+uv run python demos/ep09_tracking.py refund-fail  # 退款一直失敗 → 人工處理中（編排器公告 SagaEscalated）
+uv run python demos/ep09_tracking.py rebuild      # 砍掉 order_tracking、從 Kafka 重播，比對前後的 md5
+uv run python demos/ep09_tracking.py show A002    # 只看：A002 在讀模型裡的樣子
+```
+
+想自己一個一個開：第 8 集那七個終端機，再加一個
+
+```bash
+uv run python -m foodgo.tracking.consumer     # 投影：五條事件 topic → order_tracking（consumer group tracking）
+```
+
+| 網址 | 看什麼 |
+|---|---|
+| <http://127.0.0.1:8000/track/A001> | 追蹤頁：每秒查一次，四格步驟條（點餐、付款、廚房、外送）；還沒投影到顯示「更新中…」 |
+| <http://127.0.0.1:8000/orders/A001/tracking> | 追蹤 API（JSON）：一次查完；投影還沒讀到回 404＋`Retry-After: 1` |
+| <http://127.0.0.1:18080/ui/clusters/foodgo/consumer-groups> | 多了 `tracking`（聽 5 個 topic） |
+
+看讀模型、讀到哪：
+
+```bash
+docker compose exec postgres psql -U foodgo -c "SELECT order_id, status, payment, kitchen, delivery, courier_id FROM order_tracking ORDER BY order_id;"
+docker compose exec postgres psql -U foodgo -c "SELECT topic, partition, last_offset FROM projection_positions ORDER BY topic, partition;"
+docker compose exec postgres psql -U foodgo -c "SELECT count(*), md5(string_agg(t::text, '|' ORDER BY order_id)) FROM order_tracking t;"
+```
+
+砍掉重建（先 Ctrl-C 停掉投影 consumer；還開著的話會拒絕）：
+
+```bash
+uv run python -m foodgo.tracking.rebuild      # 清表＋忘記讀到哪（一個交易）→ 從 Kafka 重播 → 比對 md5
+```
+
+Kafka 和資料庫要一起清（`docker compose down -v`）：只清一邊的話，`projection_positions` 記的位置會對不上 topic。

@@ -28,7 +28,7 @@ class SagaRepository(Protocol):
 
 
 class InMemorySagaRepository:
-    """記憶體版：給單元測試。送出的命令放在 sent：(topic, 命令)。"""
+    """記憶體版：給單元測試。送出的命令放在 sent：(topic, 命令)；公告的事件放在 announced（第 9 集）。"""
 
     def __init__(self, topics: Mapping[str, str] = contracts.COMMAND_TOPICS) -> None:
         self._topics = dict(topics)
@@ -36,6 +36,7 @@ class InMemorySagaRepository:
         self._logs: dict[str, list[Entry]] = {}
         self._messages: set[str] = set()
         self.sent: list[tuple[str, contracts.Command]] = []
+        self.announced: list[contracts.IntegrationEvent] = []
 
     def change(self, saga_id: str, apply: Apply, *, message_id: str | None = None) -> OrderSaga | None:
         if message_id is not None and message_id in self._messages:
@@ -51,6 +52,7 @@ class InMemorySagaRepository:
         self._sagas[saga_id] = saga
         self._logs.setdefault(saga_id, []).extend(entries)
         self.sent.extend((self._topics[c.receiver], c) for c in commands)
+        self.announced.extend(saga.pull_announcements())
         return saga
 
     def get(self, saga_id: str) -> OrderSaga | None:
