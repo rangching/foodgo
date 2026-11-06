@@ -14,7 +14,7 @@ class TicketStatus(StrEnum):
     RECEIVED = "received"  # 已收單（第 7 集起：等付款）
     ACCEPTED = "accepted"  # 餐廳已接單
     REJECTED = "rejected"  # 餐廳已拒單
-    CANCELLED = "cancelled"  # 不做了：付款失敗
+    CANCELLED = "cancelled"  # 不做了：付款失敗（第 7 集）、編排器要取消（第 8 集）
     READY = "ready"  # 餐點已備妥
 
 
@@ -33,7 +33,7 @@ class Ticket:
     note: str = ""
     status: TicketStatus = TicketStatus.RECEIVED
 
-    # 第 7 集：接單、拒單、不做了，都只能從「已收單」開始
+    # 第 7 集：接單、拒單只能從「已收單」開始
     def accept(self) -> None:
         self._still_received("接單")
         self.status = TicketStatus.ACCEPTED
@@ -43,7 +43,9 @@ class Ticket:
         self.status = TicketStatus.REJECTED
 
     def cancel(self) -> None:
-        self._still_received("取消")
+        """不做了。第 8 集起接了單也能取消（編排器補償）；出餐了就回不去。"""
+        if self.status not in (TicketStatus.RECEIVED, TicketStatus.ACCEPTED):
+            raise TicketRuleViolation(f"廚房單 {self.ticket_id} 已經是 {self.status.value}，不能取消")
         self.status = TicketStatus.CANCELLED
 
     def mark_ready(self) -> None:

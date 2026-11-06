@@ -3,7 +3,7 @@ from collections.abc import Callable, Iterable
 from uuid import uuid5
 
 from foodgo import contracts
-from foodgo.ordering.events import OrderPlaced
+from foodgo.ordering.events import OrderCancelled, OrderPlaced
 from foodgo.ordering.model import Order
 from foodgo.shared.events import DomainEvent
 
@@ -19,7 +19,7 @@ def to_integration(event: DomainEvent) -> contracts.IntegrationEvent | None:
             items=tuple(contracts.OrderItem(name=line.name, quantity=line.quantity) for line in event.lines),
             note=event.note,
         )  # 單價、外送費、顧客、地址都留在點餐裡
-    return None  # OrderCancelled：目前沒有別的上下文要聽，先不公告
+    return None  # OrderCancelled：第 3 集的匯流排、第 4 集的 CRUD 版不公告；第 8 集起由 announcements() 公告
 
 
 def announcements(order: Order, events: Iterable[DomainEvent]) -> list[contracts.IntegrationEvent]:
@@ -31,9 +31,21 @@ def announcements(order: Order, events: Iterable[DomainEvent]) -> list[contracts
 
     金額、地址在送出之後就不會再變（訂單的不變條件），所以用存檔時的訂單來翻譯。
     另外兩則的編號由 OrderPlaced 的編號算出來（uuid5）：同一件事翻幾次都是同一組編號。
+
+    第 8 集起取消也公告：OrderCancelled（顧客取消，或編排器送 CancelOrder 來）。
     """
     messages: list[contracts.IntegrationEvent] = []
     for event in events:
+        if isinstance(event, OrderCancelled):
+            messages.append(
+                contracts.OrderCancelled(
+                    event_id=str(event.event_id),  # 同一件事，同一個編號與時間
+                    occurred_at=event.occurred_at.isoformat(timespec="seconds"),
+                    order_id=event.order_id,
+                    reason=event.reason,
+                )
+            )
+            continue
         message = to_integration(event)
         if message is None:
             continue

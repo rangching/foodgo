@@ -1,9 +1,10 @@
-"""外送的 consumer：從 Kafka 讀點餐與廚房的事件。自己一個程序：
+"""外送的 consumer：從 Kafka 讀訊息。自己一個程序：
 
     uv run python -m foodgo.delivery.consumer
 
-聽：ordering.events（DeliveryRequested → 開配送單）、kitchen.events（TicketAccepted → 指派外送員）；consumer group delivery。
-發：delivery.events（CourierAssigned，先寫 delivery_outbox，處理完一則就送出去）。
+第 8 集起（預設，編排式）：聽 delivery.commands（AssignCourier），做完回覆到 delivery.events。
+FOODGO_SAGA=choreography：第 7 集的接力，聽 ordering.events（DeliveryRequested → 開配送單）、kitchen.events（TicketAccepted → 指派）。
+consumer group 都是 delivery；發的 CourierAssigned 先寫 delivery_outbox，處理完一則就送出去。
 """
 import json
 from collections.abc import Sequence
@@ -16,11 +17,12 @@ from foodgo.delivery.service import Dispatch
 from foodgo.infra import config, db, kafka, outbox
 
 GROUP = "delivery"
-LISTENS = (contracts.ORDERING_TOPIC, contracts.KITCHEN_TOPIC)
+LISTENS = (contracts.DELIVERY_COMMANDS,)  # 第 8 集：只聽給自己的命令
+CHOREOGRAPHY = (contracts.ORDERING_TOPIC, contracts.KITCHEN_TOPIC)  # 第 7 集：聽點餐與廚房的事件
 
 
 def handle(dispatch: Dispatch, message: Message) -> None:
-    """處理一則 Kafka 訊息。不是外送要的事件就略過。"""
+    """處理一則 Kafka 訊息。不是外送要的就略過。"""
     payload = message.value().decode()
     kind = json.loads(payload)["type"]
     where = f"partition {message.partition()}，offset {message.offset()}"
@@ -29,6 +31,8 @@ def handle(dispatch: Dispatch, message: Message) -> None:
         dispatch.on_delivery_requested(contracts.DeliveryRequested.from_json(payload))
     elif kind == "TicketAccepted":
         dispatch.on_ticket_accepted(contracts.TicketAccepted.from_json(payload))
+    elif kind == "AssignCourier":  # 第 8 集起
+        dispatch.on_assign_courier(contracts.AssignCourier.from_json(payload))
 
 
 def run(
@@ -55,13 +59,14 @@ def run(
 
 def main() -> None:
     url = config.database_url()
+    listens = CHOREOGRAPHY if config.saga_mode() == "choreography" else LISTENS
     db.create_tables(url, *SCHEMAS)
-    for topic in (*LISTENS, contracts.DELIVERY_TOPIC):
+    for topic in (*listens, contracts.DELIVERY_TOPIC):
         kafka.ensure_topic(topic)
     dispatch = Dispatch(PostgresDeliveryRepository(url))
-    print(f"外送：開始聽 {'、'.join(LISTENS)}（consumer group：{GROUP}）", flush=True)
+    print(f"外送：開始聽 {'、'.join(listens)}（consumer group：{GROUP}）", flush=True)
     try:
-        run(dispatch, url)
+        run(dispatch, url, listens=listens)
     except KeyboardInterrupt:
         print("外送：停止", flush=True)
 

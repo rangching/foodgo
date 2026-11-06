@@ -1,6 +1,7 @@
 """廚房單存在 PostgreSQL。開單和「這則訊息處理過了」寫在同一個交易：重送幾次都只開一張。
 
 第 7 集起：kitchen_payments 記住聽到的付款結果；要公告的事件寫進廚房自己的 outbox（kitchen_outbox）。
+第 8 集起（編排式）：AcceptTicket 命令帶著菜名來，開單、決定、回覆在同一個交易；kitchen_payments 只有編舞式在用。
 """
 from collections.abc import Sequence
 
@@ -60,8 +61,10 @@ class PostgresTicketRepository:
         with psycopg.connect(self._url) as conn:
             return inbox.seen(conn, CONSUMER, message_id)
 
-    def add(self, ticket: Ticket, *, message_id: str | None = None) -> bool:
-        with psycopg.connect(self._url) as conn:  # 一個交易：記帳＋開單，一起成功、一起失敗
+    def add(
+        self, ticket: Ticket, *, message_id: str | None = None, announce: Sequence[contracts.IntegrationEvent] = ()
+    ) -> bool:
+        with psycopg.connect(self._url) as conn:  # 一個交易：記帳＋開單（＋第 8 集的回覆），一起成功、一起失敗
             if message_id is not None and not inbox.first_time(conn, CONSUMER, message_id):
                 return False  # 別人剛處理過這一則
             conn.execute(
@@ -76,6 +79,8 @@ class PostgresTicketRepository:
                     ticket.status.value,
                 ),
             )
+            for message in announce:
+                outbox.put(conn, topic=self._topic, key=ticket.order_id, message=message, table=OUTBOX)
         return True
 
     def save(self, ticket: Ticket, *, announce: Sequence[contracts.IntegrationEvent] = ()) -> None:

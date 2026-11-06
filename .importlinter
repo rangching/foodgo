@@ -84,3 +84,30 @@ source_modules =
 forbidden_modules =
     foodgo.payment.fakepay
 allow_indirect_imports = True
+
+[importlinter:contract:saga]
+name = 編排器只透過共同語言指揮
+type = forbidden
+source_modules =
+    foodgo.saga
+forbidden_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.shared
+    foodgo.app
+
+[importlinter:contract:participants]
+name = 參與者不知道誰在指揮
+type = forbidden
+source_modules =
+    foodgo.ordering
+    foodgo.payment
+    foodgo.kitchen
+    foodgo.delivery
+    foodgo.shared
+    foodgo.contracts
+    foodgo.infra
+forbidden_modules =
+    foodgo.saga

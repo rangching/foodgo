@@ -151,8 +151,12 @@
 | `TicketAccepted` v1（第 7 集） | 廚房 | 外送 | `order_id`、`ticket_id` | 菜名、備註 |
 | `TicketRejected` v1（第 7 集） | 廚房 | （第 8 集：編排器） | `order_id`、`ticket_id`、`reason` | 菜名、備註 |
 | `CourierAssigned` v1（第 7 集） | 外送 | （第 9 集：追蹤頁） | `order_id`、`delivery_id`、`courier_id` | 外送員的電話、位置：之後要再說 |
+| `OrderCancelled` v1（第 8 集） | 點餐 | 編排器（第 9 集：追蹤頁） | `order_id`、`reason`（為什麼取消） | 品項、金額：要的人自己有 |
+| `PaymentRefunded` v1（第 8 集） | 付款 | 編排器 | `order_id`、`payment_id`、`amount`（退了多少元；沒扣到款是 0） | 卡號、退款編號：留在付款的防腐層裡 |
+| `RefundFailed` v1（第 8 集） | 付款 | 編排器 | `order_id`、`payment_id`、`reason` | 金流服務的錯誤碼 |
+| `TicketCancelled` v1（第 8 集） | 廚房 | 編排器 | `order_id`、`ticket_id`、`reason` | 菜名、備註 |
 
-`OrderCancelled` 目前沒有別的上下文要聽，先不放進共同語言；等有人需要時再加（第 8 集）。付款要金額、外送要地址時也照同一條原則：第 7 集選了「另發事件」，理由見「付款要金額、外送要地址：放在哪」。
+`OrderCancelled` 第 8 集起放進共同語言：編排器要知道「訂單取消了」才算補償做完，第 9 集的追蹤頁也要聽。付款要金額、外送要地址時也照同一條原則：第 7 集選了「另發事件」，理由見「付款要金額、外送要地址：放在哪」。
 
 ### 版本規則（`schema_version`）
 
@@ -474,3 +478,140 @@ B 的老實話：
 - 付款的模型與服務只認 `CardGateway` 介面；翻譯全在 `FakePayAdapter`。換一家金流服務，只換 adapter。
 - 第 7 條邊界規則「付款只透過防腐層找金流服務」：`payment.payment／repository／postgres／service／consumer` 直接 import `payment.fakepay` 會被擋（經過 `gateway` 間接用到可以）。
 - 訂單編號當**冪等鍵**（`merchant_order_no`）：付款 consumer 授權完、還沒 commit 就當掉，重送時金流服務回上一次的答案，不會刷兩次卡。
+
+## 出錯時怎麼倒回去（第 8 集：編排式 Saga 與補償）
+
+### 為什麼換成編排式
+
+第 7 集的編舞式，失敗分支沒有人負責：付款失敗時點餐不知道、拒單時沒有人退款。要補上，只能每個人再多聽幾條線，流程散在四個 consumer 裡。編排式把流程收回一個地方：
+
+| | 編舞式（第 7 集） | 編排式（第 8 集） |
+|---|---|---|
+| 誰決定下一步 | 每個參與者自己：聽到誰的事件就做 | 編排器 `OrderSaga`：收到回覆，決定下一個命令 |
+| 參與者聽什麼 | 別人的事件（`ordering.events`、`payment.events`…），常常要聽兩條 | 只聽給自己的**命令 topic**（`payment.commands`…） |
+| 流程寫在哪 | 散在「誰訂閱誰」裡 | 一張狀態機（`foodgo/saga/machine.py`） |
+| 走到哪了 | 拼 4 張表、4 個 topic | 查 `sagas` 一列；怎麼走過來的，看 `saga_log` |
+| 失敗時 | 誰該補償要大家說好 | 編排器照「做成的步驟」倒著送補償命令 |
+| 代價 | 少一個元件 | 多一個要顧好的元件（它掛了流程就停；狀態存在資料庫，重啟後接著做） |
+
+`FOODGO_SAGA` 切換兩種接法（只影響付款、廚房、外送的 consumer 聽哪些 topic）：
+
+| `FOODGO_SAGA` | 付款聽 | 廚房聽 | 外送聽 | 要不要開編排器 |
+|---|---|---|---|---|
+| `orchestration`（預設） | `payment.commands` | `kitchen.commands` | `delivery.commands` | 要：`python -m foodgo.saga.consumer`＋`python -m foodgo.ordering.consumer` |
+| `choreography`（第 7 集） | `ordering.events` | `ordering.events`、`payment.events` | `ordering.events`、`kitchen.events` | 不用 |
+
+同一個 Kafka、同一個資料庫不要兩種接法混著跑（consumer group 名稱一樣，換接法會從頭讀另一條 topic）：要換先 `docker compose down -v`。
+
+### 詞
+
+| 詞 | 程式／例子 | 意思 |
+|---|---|---|
+| 編排器 orchestrator | `foodgo.saga`：`Orchestrator`＋`OrderSaga` | 記住每張訂單走到哪、送命令、收回覆、失敗時決定補償。只說共同語言 |
+| `OrderSaga` | 一張訂單一個，`saga_id`＝`order_id` | 狀態機：狀態、正在等哪個回覆、做成了哪幾步、還要補償哪幾步 |
+| 命令 command | `contracts.Command`：`AuthorizePayment`、`RefundPayment`… | 祈使句、指名一個接收者（`receiver`）。接收者可以說不：回一則失敗的事件（第 3 集的命令 vs 事件） |
+| 命令 topic | `<接收者>.commands`，例如 `payment.commands` | 一個參與者一條，名字跟著**收的人**；命令的格式也歸收的人維護（它說它接受什麼）。事件 topic 跟著**發的人**：`<發布者>.events` |
+| 回覆 reply | `PaymentAuthorized`、`TicketRejected`… | 參與者做完公告在自己的事件 topic：還是過去式的事件。編排器聽四條事件 topic，照 `order_id` 交給對的 saga |
+| 補償 compensation | `RefundPayment`、`CancelTicket`、`CancelOrder` | 做成的步驟倒著抵銷（後做的先補）。補償也是命令，也要等回覆、也可能失敗 |
+| 逾時 timeout | `FOODGO_SAGA_TIMEOUT`（預設 3 秒） | 送出命令就開始計時：`sagas.deadline`。編排器每處理完一則、每閒一秒看一次 |
+| 重試 retry | `FOODGO_SAGA_RETRIES`（預設 1 次） | 逾時、或退款失敗：同一個命令再送一次（新的編號）。參與者照訂單編號認，重做不會做兩次，只是再回一次 |
+| 結果不確定 | 逾時放棄的那一步 | 對方也許做了、只是很慢。它的補償照送、但不等回覆：命令 topic 照順序，補償一定排在原本的命令後面 |
+| 人工處理 `needs_attention` | 退款重試了還是失敗 | 補償不能默默放棄：saga 停在這裡，`saga_log` 寫清楚卡在哪，等人來處理 |
+| `saga_log` | 每一列：`state`、`action`、`message`、`detail` | saga 的日記：收到什麼、送了什麼、逾時、重試、補償、放棄。只往後加 |
+
+### 命令與回覆
+
+| 命令（祈使句） | 誰送 → 誰收 | 命令 topic | 帶什麼 | 回覆（成功／失敗） |
+|---|---|---|---|---|
+| `AuthorizePayment` 授權付款 | 編排器 → 付款 | `payment.commands` | `order_id`、`customer_id`、`amount` | `PaymentAuthorized`／`PaymentFailed` |
+| `AcceptTicket` 接單 | 編排器 → 廚房 | `kitchen.commands` | `order_id`、`restaurant_id`、`items`、`note`（沒有價格） | `TicketAccepted`／`TicketRejected` |
+| `AssignCourier` 指派外送員 | 編排器 → 外送 | `delivery.commands` | `order_id`、`restaurant_id`（取餐點）、`delivery_address` | `CourierAssigned` |
+| `RefundPayment` 退款（補償） | 編排器 → 付款 | `payment.commands` | `order_id`、`reason`（不帶金額：付款自己知道授權了多少） | `PaymentRefunded`／`RefundFailed` |
+| `CancelTicket` 取消廚房單（補償） | 編排器 → 廚房 | `kitchen.commands` | `order_id`、`reason` | `TicketCancelled`（已經出餐的取消不了，不回覆） |
+| `CancelOrder` 取消訂單（補償） | 編排器 → 點餐 | `ordering.commands` | `order_id`、`reason` | `OrderCancelled` |
+
+- 命令和事件用同一種 JSON 信封：`Message` 是共同的基底，底下分 `IntegrationEvent`（過去式）與 `Command`（祈使句，多一個 `receiver`）。outbox、relay、`processed_messages` 一行都不用改；命令的 `event_id` 就是這則命令的編號。
+- 點餐送出時照樣公告第 7 集那三則事實（`OrderPlaced`、`PaymentRequested`、`DeliveryRequested`）；編排式下只有編排器在聽，它**收齊三則**才出發（同一個交易、同一個 key，照順序到）。`OrderPlaced` v1 沒有改。
+- 參與者重做要安全：同一張訂單已經有結果了（編排器逾時重送），就照現在的樣子再回一次，不會刷兩次卡、開兩張單。
+
+### 狀態與轉移
+
+```mermaid
+stateDiagram-v2
+    [*] --> started: 收到 OrderPlaced
+    started --> payment_pending: 收齊三則事實／送 AuthorizePayment
+    payment_pending --> kitchen_pending: PaymentAuthorized／送 AcceptTicket
+    kitchen_pending --> delivery_pending: TicketAccepted／送 AssignCourier
+    delivery_pending --> completed: CourierAssigned
+    payment_pending --> compensating: PaymentFailed、逾時重試仍沒回覆
+    kitchen_pending --> compensating: TicketRejected、逾時重試仍沒回覆
+    compensating --> cancelled: 每一則補償都回覆了（最後是 OrderCancelled）
+    compensating --> needs_attention: 補償失敗或沒回覆，重試了還是一樣
+    completed --> [*]
+    cancelled --> [*]
+    needs_attention --> [*]
+```
+
+| 狀態 | 意思 | 在等誰 |
+|---|---|---|
+| `started` | 收到訂單了，還在收齊點餐給的資料 | 點餐的三則事實 |
+| `payment_pending` | 已送 `AuthorizePayment` | 付款 |
+| `kitchen_pending` | 已送 `AcceptTicket` | 廚房 |
+| `delivery_pending` | 已送 `AssignCourier`（第 8 集不計時：派車台一定派得到人） | 外送 |
+| `completed` | 外送員指派好了 | — |
+| `compensating` | 倒回去中：一則一則送補償命令 | 正在補償的那個參與者 |
+| `cancelled` | 補償做完，訂單已取消 | — |
+| `needs_attention` | 補償重試了還是失敗：要人工處理 | 人 |
+
+| 哪裡失敗 | 已經做成的 | 補償（照順序） |
+|---|---|---|
+| 付款失敗 `PaymentFailed` | — | `CancelOrder` |
+| 餐廳拒單 `TicketRejected` | 付款 | `RefundPayment` → `CancelOrder` |
+| 廚房逾時、重試仍沒回覆 | 付款（廚房不確定） | `CancelTicket`（先送、不等）→ `RefundPayment` → `CancelOrder` |
+| 付款逾時、重試仍沒回覆 | （付款不確定） | `RefundPayment`（先送、不等）→ `CancelOrder` |
+| 顧客自己取消（`OrderCancelled` 不是編排器叫的） | 看走到哪 | 同上，但不再送 `CancelOrder` |
+| 退款失敗 `RefundFailed`，重試還是失敗 | — | 停下來：`needs_attention` |
+
+### 存的地方：`sagas`、`saga_log`、`saga_outbox`
+
+| 表 | 一列是什麼 | 重要欄位 |
+|---|---|---|
+| `sagas` | 一張訂單的 saga 現在的樣子 | `state`、`waiting_for`（等哪個命令的回覆）、`attempts`、`deadline`、`done`、`todo`、`reason`、`data`（金額、地址、菜名、一路收到的編號） |
+| `saga_log` | 一件事：收到、送出、逾時、重試、補償、結束、放棄、略過 | `state`（寫這一列時的狀態）、`action`、`message`、`detail`、`at` |
+| `saga_outbox` | 編排器要送的命令 | 和其他 outbox 一樣；consumer 處理完一則就送到各自的命令 topic |
+
+一則回覆進來＝一個本地交易：`processed_messages` 記帳＋改 `sagas`＋寫 `saga_log`＋命令寫進 `saga_outbox`。編排器當掉重啟，從 `sagas` 接著做；逾時看 `deadline` 欄位，不靠記憶體裡的計時器。
+
+| `saga_log.action` | 意思 |
+|---|---|
+| `receive` | 收到一則事件（點餐的事實或參與者的回覆） |
+| `send` | 送出正常流程的命令 |
+| `timeout` | 等到 `deadline` 還沒有回覆 |
+| `retry` | 同一個命令再送一次 |
+| `compensate` | 送出補償命令 |
+| `finish` | 走完：`completed` 或 `cancelled` |
+| `give_up` | 放棄：`needs_attention`，要人工處理 |
+| `ignore` | 不是現在在等的回覆（重複的、遲到的），記下來但不動 |
+
+### 編排器放在哪：`foodgo/saga/` 獨立套件
+
+- 它不是限界上下文：沒有自己的領域語言，只說共同語言（命令與事件）。放在獨立套件，第 8 條邊界規則才能直接寫成「只認 `foodgo.contracts`」。
+- 點餐也只是參與者之一：收 `CancelOrder`、公告 `OrderCancelled`，和付款、廚房、外送一視同仁。
+- 第 10 集拆服務時，可以自己一個服務，也可以和點餐放同一個服務、用點餐的資料庫——程式不用改。
+
+| 邊界規則 | 擋什麼 |
+|---|---|
+| 第 8 條「編排器只透過共同語言指揮」 | `foodgo.saga` 不能 import 四個上下文、共用核心、組裝點（可以用 `foodgo.contracts`、`foodgo.infra`） |
+| 第 9 條「參與者不知道誰在指揮」 | 四個上下文、共用核心、共同語言、基礎設施都不能 import `foodgo.saga`：參與者只管收命令、回覆，不知道是誰送的 |
+
+### 故障開關（第 8 集）
+
+| 環境變數 | 加在哪個程序 | 會怎樣 |
+|---|---|---|
+| `FOODGO_FAULT_PAYMENT=decline` | 付款 consumer | 授權被拒 → `PaymentFailed` → 編排器 `CancelOrder` → `cancelled` |
+| `FOODGO_FAULT_KITCHEN=reject` | 廚房 consumer | 付款過了也拒單 → `TicketRejected` → `RefundPayment` → `CancelOrder` → `cancelled` |
+| `FOODGO_FAULT_KITCHEN=crash` | 廚房 consumer | 收到 `AcceptTicket` 就當掉 → 逾時、重試、還是沒回覆 → 補償 → `cancelled`；修好重啟後先接單、再被 `CancelTicket` 撤銷 |
+| `FOODGO_FAULT_KITCHEN=slow` | 廚房 consumer | 每一則想 `FOODGO_KITCHEN_SLOW_SECONDS` 秒（預設 4）→ 逾時、重試 → 回覆在重試期間到了 → 照樣 `completed` |
+| `FOODGO_FAULT_REFUND=fail` | 付款 consumer | 退款都失敗 → `RefundFailed` → 重試 → 還是失敗 → `needs_attention` |
+| `FOODGO_SAGA_TIMEOUT=3`、`FOODGO_SAGA_RETRIES=1` | 編排器 | 等回覆幾秒、逾時（或退款失敗）後再送幾次 |
+| `FOODGO_SAGA=choreography` | 付款、廚房、外送 consumer | 換回第 7 集的接力 |

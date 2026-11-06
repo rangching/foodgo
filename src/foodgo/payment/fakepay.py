@@ -2,14 +2,17 @@
 
 付款的程式只透過 gateway.py（防腐層）跟它說話；模型與服務直接 import 這個檔，會被第 7 條邊界規則擋下。
 FOODGO_FAULT_PAYMENT=decline：每一筆都拒絕（卡片額度不足），示範付款失敗。
+FOODGO_FAULT_REFUND=fail（第 8 集）：每一筆退款都失敗（發卡銀行連不上），示範補償本身失敗。
 """
 from typing import Any
 
 
 class FakePay:
-    def __init__(self, *, fault: str = "") -> None:
+    def __init__(self, *, fault: str = "", refund_fault: str = "") -> None:
         self._fault = fault
+        self._refund_fault = refund_fault
         self._answers: dict[str, dict[str, Any]] = {}  # 真的金流服務會存在他們那邊；假的只記在記憶體
+        self._refunds: dict[str, dict[str, Any]] = {}
 
     def create_authorization(self, request: dict[str, Any]) -> dict[str, Any]:
         """他們的 API：金額用「分」（amount_minor），結果是 APPROVED／DECLINED。
@@ -24,3 +27,17 @@ class FakePay:
                 answer = {"result": "APPROVED", "auth_code": f"AUTH-{len(self._answers) + 1:04d}", "decline_code": None}
             self._answers[key] = {**answer, "amount_minor": request["amount_minor"], "currency": request["currency"]}
         return self._answers[key]
+
+    def create_refund(self, request: dict[str, Any]) -> dict[str, Any]:
+        """他們的退款 API（第 8 集）：結果是 REFUNDED／ERROR。退成功的同一個 merchant_order_no 再送一次，回上一次的答案。
+
+        ERROR 不記住：下次再試可能就好了（暫時的錯誤）。
+        """
+        key = request["merchant_order_no"]
+        if key in self._refunds:
+            return self._refunds[key]
+        if self._refund_fault == "fail":
+            return {"result": "ERROR", "refund_no": None, "error_code": "issuer_unavailable"}
+        answer = {"result": "REFUNDED", "refund_no": f"RF-{len(self._refunds) + 1:04d}", "error_code": None}
+        self._refunds[key] = {**answer, "amount_minor": request["amount_minor"], "currency": request["currency"]}
+        return self._refunds[key]

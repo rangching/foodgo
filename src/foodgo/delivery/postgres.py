@@ -51,8 +51,10 @@ class PostgresDeliveryRepository:
         with psycopg.connect(self._url) as conn:
             return inbox.seen(conn, CONSUMER, message_id)
 
-    def add(self, delivery: Delivery, *, message_id: str) -> bool:
-        with psycopg.connect(self._url) as conn:  # 一個交易：記帳＋開配送單
+    def add(
+        self, delivery: Delivery, *, message_id: str, announce: Sequence[contracts.IntegrationEvent] = ()
+    ) -> bool:
+        with psycopg.connect(self._url) as conn:  # 一個交易：記帳＋開配送單（＋第 8 集的回覆）
             if not inbox.first_time(conn, CONSUMER, message_id):
                 return False
             conn.execute(
@@ -67,6 +69,8 @@ class PostgresDeliveryRepository:
                     delivery.courier_id,
                 ),
             )
+            for message in announce:
+                outbox.put(conn, topic=self._topic, key=delivery.order_id, message=message, table=OUTBOX)
         return True
 
     def save(self, delivery: Delivery, *, announce: Sequence[contracts.IntegrationEvent] = ()) -> None:

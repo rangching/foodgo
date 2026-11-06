@@ -6,6 +6,7 @@ from enum import StrEnum
 class PaymentStatus(StrEnum):
     AUTHORIZED = "authorized"  # 付款已授權
     FAILED = "failed"  # 付款已失敗
+    REFUNDED = "refunded"  # 付款已退款（第 8 集：補償）
 
 
 @dataclass(frozen=True)
@@ -18,4 +19,4 @@ class Payment:
     amount: int  # 新臺幣，元
     status: PaymentStatus
     reference: str = ""  # 金流服務給的授權碼
-    reason: str = ""  # 失敗的原因（我們的話）
+    reason: str = ""  # 失敗的原因（我們的話）；第 8 集起也記退款失敗的原因

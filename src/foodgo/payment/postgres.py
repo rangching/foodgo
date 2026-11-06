@@ -14,9 +14,9 @@ CREATE TABLE IF NOT EXISTS payments (
     order_id     text        NOT NULL UNIQUE,   -- 一張訂單一筆付款；只記編號，不認識點餐的表
     customer_id  text        NOT NULL,
     amount       integer     NOT NULL,          -- 元
-    status       text        NOT NULL,          -- authorized／failed
+    status       text        NOT NULL,          -- authorized／failed／refunded（第 8 集）
     reference    text        NOT NULL,          -- 金流服務的授權碼
-    reason       text        NOT NULL,          -- 失敗的原因
+    reason       text        NOT NULL,          -- 失敗的原因（第 8 集起也記退款失敗的原因）
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 """
@@ -66,6 +66,32 @@ class PostgresPaymentRepository:
             )
             for message in announce:
                 outbox.put(conn, topic=self._topic, key=payment.order_id, message=message, table=OUTBOX)
+        return True
+
+    def save(
+        self, payment: Payment | None, *, message_id: str, announce: Sequence[contracts.IntegrationEvent] = ()
+    ) -> bool:
+        with psycopg.connect(self._url) as conn:  # 一個交易：記帳＋付款的新樣子＋outbox
+            if not inbox.first_time(conn, CONSUMER, message_id):
+                return False
+            if payment is not None:
+                conn.execute(
+                    "INSERT INTO payments (payment_id, order_id, customer_id, amount, status, reference, reason)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                    " ON CONFLICT (payment_id) DO UPDATE"
+                    " SET status = EXCLUDED.status, reference = EXCLUDED.reference, reason = EXCLUDED.reason",
+                    (
+                        payment.payment_id,
+                        payment.order_id,
+                        payment.customer_id,
+                        payment.amount,
+                        payment.status.value,
+                        payment.reference,
+                        payment.reason,
+                    ),
+                )
+            for message in announce:
+                outbox.put(conn, topic=self._topic, key=message.order_id, message=message, table=OUTBOX)
         return True
 
     def _select(self, where: str, params: tuple) -> list[Payment]:

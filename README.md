@@ -109,7 +109,7 @@ uv run python demos/ep07_choreography.py decline      # 付款失敗的那一條
 uv run python demos/ep07_choreography.py trace A001   # 只查：4 張表、4 個 topic、3 個 consumer group
 ```
 
-想自己一個一個開（每個一個終端機；先開 consumer、再下單）：
+想自己一個一個開（每個一個終端機；先開 consumer、再下單。第 8 集起 consumer 預設聽編排器的命令，照這一節開要在三個 consumer 前面加 `FOODGO_SAGA=choreography`）：
 
 ```bash
 uv run fastapi dev                            # 點餐：下單寫 events＋outbox（OrderPlaced、PaymentRequested、DeliveryRequested）
@@ -138,3 +138,54 @@ docker compose exec postgres psql -U foodgo -c 'SELECT payment_id, order_id, amo
 docker compose exec postgres psql -U foodgo -c 'SELECT ticket_id, order_id, status FROM tickets;'
 docker compose exec postgres psql -U foodgo -c 'SELECT delivery_id, order_id, status, courier_id FROM deliveries;'
 ```
+
+## 出錯時怎麼倒回去：編排式 Saga（第 8 集）
+
+第 8 集起由編排器 `OrderSaga`（`foodgo.saga`）指揮：它收齊點餐的三則事實，送命令給付款、廚房、外送（`payment.commands`、`kitchen.commands`、`delivery.commands`），收回覆、決定下一步；失敗時倒回去補償（退款、取消訂單）。每一步都記在 `saga_log` 表。
+
+一條指令跑一個情境（會自己起 relay、點餐、編排器、付款、廚房、外送六個程序，下一張新的單，等到 saga 走完）：
+
+```bash
+uv run python demos/ep08_orchestration.py              # 一路走到外送員指派：completed
+uv run python demos/ep08_orchestration.py decline      # 付款失敗 → CancelOrder → cancelled
+uv run python demos/ep08_orchestration.py reject       # 付款成功、餐廳拒單 → RefundPayment → CancelOrder → cancelled
+uv run python demos/ep08_orchestration.py crash        # 廚房當機：逾時 → 重試 → 補償；修好重啟後廚房單也撤銷
+uv run python demos/ep08_orchestration.py slow         # 廚房很慢：逾時 → 重試 → 回覆到了 → completed
+uv run python demos/ep08_orchestration.py refund-fail  # 拒單＋退款失敗 → 重試 → needs_attention（人工處理）
+uv run python demos/ep08_orchestration.py log A002     # 只看：A002 的 sagas、saga_log 與各上下文的表
+```
+
+想自己一個一個開（每個一個終端機）：
+
+```bash
+uv run fastapi dev                            # 點餐 API：下單寫 events＋outbox
+uv run python -m foodgo.ordering.relay        # outbox → ordering.events
+uv run python -m foodgo.ordering.consumer     # 點餐：聽 ordering.commands（CancelOrder）
+uv run python -m foodgo.saga.consumer         # 編排器：聽四條事件 topic，送命令到四條命令 topic
+uv run python -m foodgo.payment.consumer      # 付款：聽 payment.commands
+uv run python -m foodgo.kitchen.consumer      # 廚房：聽 kitchen.commands
+uv run python -m foodgo.delivery.consumer     # 外送：聽 delivery.commands
+```
+
+看 saga 走到哪、怎麼走過來的：
+
+```bash
+docker compose exec postgres psql -U foodgo -c "SELECT saga_id, state, waiting_for, attempts, reason FROM sagas;"
+docker compose exec -e PGTZ=Asia/Taipei postgres psql -U foodgo -c "SELECT id, to_char(at, 'HH24:MI:SS.MS') AS at, state, action, message, detail FROM saga_log WHERE saga_id = 'A002' ORDER BY id;"
+```
+
+| 網址 | 看什麼 |
+|---|---|
+| <http://127.0.0.1:18080/ui/clusters/foodgo/all-topics> | 八個 topic：四條 `*.events`、四條 `*.commands` |
+| <http://127.0.0.1:18080/ui/clusters/foodgo/consumer-groups> | 五個 consumer group：`saga`、`ordering`、`payment`、`kitchen`、`delivery` |
+
+故障開關與設定（第 8 集新增）：
+
+| 環境變數 | 加在哪個程序 | 會怎樣 |
+|---|---|---|
+| `FOODGO_FAULT_KITCHEN=slow` | 廚房 consumer | 每則命令想 `FOODGO_KITCHEN_SLOW_SECONDS` 秒（預設 4）才回 |
+| `FOODGO_FAULT_REFUND=fail` | 付款 consumer | 每一筆退款都失敗：`RefundFailed` |
+| `FOODGO_SAGA_TIMEOUT`、`FOODGO_SAGA_RETRIES` | 編排器 | 等回覆幾秒（預設 3）、逾時或退款失敗後再送幾次（預設 1） |
+| `FOODGO_SAGA=choreography` | 付款、廚房、外送 consumer | 換回第 7 集的接力（要換先 `docker compose down -v`：同一個 consumer group 換 topic 會從頭讀） |
+
+第 7 集的 `FOODGO_FAULT_PAYMENT=decline`、`FOODGO_FAULT_KITCHEN=reject|crash` 照用，現在編排器會接手補償。

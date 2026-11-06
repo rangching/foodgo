@@ -5,6 +5,7 @@
     uv run python demos/ep07_choreography.py trace A001   # 只查：A001 走到哪了（4 張表、4 個 topic、3 個 consumer group）
 
 要先 docker compose up -d。用 API 的資料庫（foodgo）與正式的 topic，跑完在 Kafka UI 看得到。
+第 8 集起 consumer 預設聽編排器的命令；這個示範幫三個 consumer 加上 FOODGO_SAGA=choreography，照第 7 集的接力跑。
 自己開著的 relay、consumer 先停掉（Ctrl-C）：不然同一個 consumer group 會有兩個成員分著讀，紀錄印在兩個地方。
 """
 
@@ -74,7 +75,7 @@ def start(fault_payment: str = "") -> list[subprocess.Popen]:
         kafka.ensure_topic(topic)
     programs = []
     for name, module in PROGRAMS.items():
-        env = dict(os.environ)
+        env = {**os.environ, "FOODGO_SAGA": "choreography"}  # 第 8 集起要明說：用第 7 集的接力
         if name == "付款" and fault_payment:
             env["FOODGO_FAULT_PAYMENT"] = fault_payment
         programs.append(subprocess.Popen([sys.executable, "-m", module], env=env))

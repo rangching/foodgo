@@ -15,8 +15,13 @@ class DeliveryRepository(Protocol):
 
     def seen(self, message_id: str) -> bool: ...
 
-    def add(self, delivery: Delivery, *, message_id: str) -> bool:
-        """新增配送單，並記下是哪一則訊息開的。處理過了就回 False。"""
+    def add(
+        self, delivery: Delivery, *, message_id: str, announce: Sequence[contracts.IntegrationEvent] = ()
+    ) -> bool:
+        """新增配送單，並記下是哪一則訊息開的。處理過了就回 False。
+
+        announce（第 8 集）：開單時就指派好外送員，回覆一起寫進 delivery_outbox。
+        """
         ...
 
     def save(self, delivery: Delivery, *, announce: Sequence[contracts.IntegrationEvent] = ()) -> None:
@@ -53,11 +58,14 @@ class InMemoryDeliveryRepository:
     def seen(self, message_id: str) -> bool:
         return message_id in self._messages
 
-    def add(self, delivery: Delivery, *, message_id: str) -> bool:
+    def add(
+        self, delivery: Delivery, *, message_id: str, announce: Sequence[contracts.IntegrationEvent] = ()
+    ) -> bool:
         if message_id in self._messages:
             return False
         self._messages.add(message_id)
         self._deliveries[delivery.delivery_id] = delivery
+        self.announced.extend(announce)
         return True
 
     def save(self, delivery: Delivery, *, announce: Sequence[contracts.IntegrationEvent] = ()) -> None:

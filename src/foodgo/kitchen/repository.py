@@ -22,8 +22,13 @@ class TicketRepository(Protocol):
         """這則訊息處理過了沒？"""
         ...
 
-    def add(self, ticket: Ticket, *, message_id: str | None = None) -> bool:
-        """新增廚房單，並記下是哪一則訊息開的。這則訊息已經開過單了就什麼都不做，回 False。"""
+    def add(
+        self, ticket: Ticket, *, message_id: str | None = None, announce: Sequence[contracts.IntegrationEvent] = ()
+    ) -> bool:
+        """新增廚房單，並記下是哪一則訊息開的。這則訊息已經開過單了就什麼都不做，回 False。
+
+        announce（第 8 集）：開單時就決定好的回覆（接單或拒單），一起寫進 kitchen_outbox。
+        """
         ...
 
     def save(self, ticket: Ticket, *, announce: Sequence[contracts.IntegrationEvent] = ()) -> None:
@@ -63,12 +68,15 @@ class InMemoryTicketRepository:
     def seen(self, message_id: str) -> bool:
         return message_id in self._messages
 
-    def add(self, ticket: Ticket, *, message_id: str | None = None) -> bool:
+    def add(
+        self, ticket: Ticket, *, message_id: str | None = None, announce: Sequence[contracts.IntegrationEvent] = ()
+    ) -> bool:
         if message_id is not None:
             if message_id in self._messages:
                 return False
             self._messages.add(message_id)
         self._tickets[ticket.ticket_id] = ticket
+        self.announced.extend(announce)
         return True
 
     def save(self, ticket: Ticket, *, announce: Sequence[contracts.IntegrationEvent] = ()) -> None:
