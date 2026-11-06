@@ -72,11 +72,16 @@ def db_url(test_db_url: str) -> str:
         from foodgo.ordering.event_sourcing import SCHEMAS as EVENT_SOURCING  # 第 6 集：events、snapshots
     except ImportError:  # 第 6 集起點還沒有
         EVENT_SOURCING = ()
+    try:
+        from foodgo.delivery.postgres import SCHEMAS as DELIVERY  # 第 7 集：付款、外送自己的表
+        from foodgo.payment.postgres import SCHEMAS as PAYMENT
+    except ImportError:  # 第 7 集起點還沒有
+        DELIVERY = PAYMENT = ()
 
     with psycopg.connect(test_db_url, autocommit=True) as conn:
         conn.execute("DROP SCHEMA public CASCADE")
         conn.execute("CREATE SCHEMA public")
-    db.create_tables(test_db_url, *ORDERING, *EVENT_SOURCING, *KITCHEN)
+    db.create_tables(test_db_url, *ORDERING, *EVENT_SOURCING, *KITCHEN, *PAYMENT, *DELIVERY)
     return test_db_url
 
 

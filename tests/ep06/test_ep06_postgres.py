@@ -177,8 +177,8 @@ def test_save_appends_the_events_and_the_outbox_row_together(db_url, sql, topic)
     assert sql("SELECT version, type FROM events ORDER BY version") == [
         (1, "OrderDrafted"), (2, "ItemAdded"), (3, "ItemAdded"), (4, "OrderPlaced")
     ]
-    [(event_id, kind, payload)] = sql("SELECT event_id, type, payload::text FROM outbox")
-    assert kind == "OrderPlaced" and json.loads(payload)["data"]["order_id"] == "A001"
+    [(event_id, kind, payload)] = sql("SELECT event_id, type, payload::text FROM outbox WHERE type = 'OrderPlaced'")
+    assert kind == "OrderPlaced" and json.loads(payload)["data"]["order_id"] == "A001"  # 第 7 集起還有給付款、外送的兩則
     assert sql("SELECT event_id::text FROM events WHERE type = 'OrderPlaced'") == [(event_id,)]  # 同一件事、同一個編號
     assert sql("SELECT count(*) FROM orders") == [(0,)]  # 不再寫第 4 集的 orders 表
 
@@ -307,7 +307,8 @@ def test_the_postgres_app_is_event_sourced(db_url, sql):
     with TestClient(create_postgres_app(db_url)) as restarted:
         assert restarted.post("/orders/A001/cancel", json={"reason": "顧客改變心意"}).json()["version"] == 5
     assert sql("SELECT count(*) FROM events WHERE stream_id = 'A001'") == [(5,)]
-    assert sql("SELECT type FROM outbox") == [("OrderPlaced",)]  # OrderCancelled 還是不對外公告
+    kinds = [kind for (kind,) in sql("SELECT type FROM outbox ORDER BY id")]
+    assert kinds[0] == "OrderPlaced" and "OrderCancelled" not in kinds  # OrderCancelled 還是不對外公告（第 7 集起送出時多兩則）
 
 
 def test_the_kitchen_still_gets_the_order_through_kafka(db_url, topic, group):
