@@ -44,7 +44,7 @@ def create_app(
             on_startup()
         yield
 
-    app = FastAPI(title="好食快送 FoodGo", version="0.6.0", lifespan=lifespan)
+    app = FastAPI(title="好食快送 FoodGo", version="0.7.0", lifespan=lifespan)
     app.include_router(ordering_api.build_router(orders))
     app.include_router(kitchen_api.build_router(kitchen))
 
@@ -62,6 +62,7 @@ def create_postgres_app(url: str | None = None) -> FastAPI:
     """第 4 集起：訂單、廚房單存 PostgreSQL。事件寫進 outbox，由 relay 送到 Kafka，廚房 consumer 另外跑。
 
     第 6 集起訂單改成事件溯源：存在 events 表，要用的時候 fold 回來（第 4 集的 orders 表不再用）。
+    第 7 集起付款、廚房、外送各自是一個 consumer，聽事件接力（編舞式 Saga）；API 只負責下單與廚房出餐。
     """
     url = url or config.database_url()
     return create_app(

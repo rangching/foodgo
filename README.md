@@ -96,3 +96,45 @@ uv run python demos/ep06_event_store.py race     # 只看其中一段：events�
 看 events 表：`docker compose exec -e PGTZ=Asia/Taipei postgres psql -U foodgo -c 'SELECT position, stream_id, version, type, occurred_at FROM events;'`
 （示範腳本的資料在另一個資料庫：`psql -U foodgo -d foodgo_demo`）。
 有人比你先改了同一張訂單，API 回 409：重新讀取，再決定要不要做。
+
+## 付款、廚房、外送接力：編舞式 Saga（第 7 集）
+
+第 7 集起一張訂單要經過四個上下文：點餐送出 → 付款授權 → 廚房接單 → 外送指派外送員。沒有人指揮，每個 consumer 聽事件、做自己的事、公告結果。
+
+一條指令跑完整條流程（會自己起 relay 與三個 consumer、下一張單、等到外送員指派，再查走到哪）：
+
+```bash
+uv run python demos/ep07_choreography.py              # A001：一路走到外送員 M01
+uv run python demos/ep07_choreography.py decline      # 付款失敗的那一條：停在半路
+uv run python demos/ep07_choreography.py trace A001   # 只查：4 張表、4 個 topic、3 個 consumer group
+```
+
+想自己一個一個開（每個一個終端機；先開 consumer、再下單）：
+
+```bash
+uv run fastapi dev                            # 點餐：下單寫 events＋outbox（OrderPlaced、PaymentRequested、DeliveryRequested）
+uv run python -m foodgo.ordering.relay        # outbox → ordering.events
+uv run python -m foodgo.payment.consumer      # 付款：PaymentRequested → 假的金流服務 → payment.events
+uv run python -m foodgo.kitchen.consumer      # 廚房：OrderPlaced＋PaymentAuthorized → kitchen.events
+uv run python -m foodgo.delivery.consumer     # 外送：DeliveryRequested＋TicketAccepted → delivery.events
+```
+
+| 網址 | 看什麼 |
+|---|---|
+| <http://127.0.0.1:18080/ui/clusters/foodgo/all-topics> | 四個 topic：`ordering.events`、`payment.events`、`kitchen.events`、`delivery.events` |
+| <http://127.0.0.1:18080/ui/clusters/foodgo/consumer-groups> | 三個 consumer group：`payment`、`kitchen`、`delivery`，lag 都是 0 |
+
+故障開關（第 7 集新增）：
+
+| 環境變數 | 加在哪個程序 | 會怎樣 |
+|---|---|---|
+| `FOODGO_FAULT_PAYMENT=decline` | 付款 consumer | 假的金流服務每一筆都拒絕：`PaymentFailed`，廚房不做了，訂單卻還是 placed |
+| `FOODGO_FAULT_KITCHEN=reject` | 廚房 consumer | 付款過了也拒單：`TicketRejected`（第 8 集示範補償用） |
+
+看各上下文自己的表：
+
+```bash
+docker compose exec postgres psql -U foodgo -c 'SELECT payment_id, order_id, amount, status, reason FROM payments;'
+docker compose exec postgres psql -U foodgo -c 'SELECT ticket_id, order_id, status FROM tickets;'
+docker compose exec postgres psql -U foodgo -c 'SELECT delivery_id, order_id, status, courier_id FROM deliveries;'
+```

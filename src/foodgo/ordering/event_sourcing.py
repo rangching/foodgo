@@ -14,7 +14,7 @@ from foodgo import contracts
 from foodgo.infra import event_store, outbox
 from foodgo.ordering import codec
 from foodgo.ordering.fold import OrderState, fold
-from foodgo.ordering.integration import to_integration
+from foodgo.ordering.integration import announcements
 from foodgo.ordering.model import Order
 from foodgo.shared.event_store import ConcurrencyConflict, RecordedEvent
 from foodgo.shared.events import DomainEvent
@@ -133,12 +133,15 @@ class EventSourcedOrderRepository:
         return Order.from_state(loaded.state)  # 第 4 集的 Order.restore() 退場：狀態一律是 fold 算出來的
 
     def save(self, order: Order) -> None:
-        """新事件接在讀到的版本後面；要公告的寫進 outbox。同一個交易：一起成功、一起失敗。"""
+        """新事件接在讀到的版本後面；要公告的寫進 outbox。同一個交易：一起成功、一起失敗。
+
+        第 7 集起，送出時要公告的有三則（OrderPlaced、PaymentRequested、DeliveryRequested）：一樣在這個交易裡。
+        """
         events = order.pull_events()
         if not events:
             return
         expected = order.version - len(events)  # 讀進來時是第幾版
-        messages = [m for m in map(to_integration, events) if m is not None]
+        messages = announcements(order, events)
         with psycopg.connect(self._url) as conn:
             version = self.events.append(order.order_id, events, expected_version=expected, conn=conn)
             for message in messages:

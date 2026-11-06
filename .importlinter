@@ -71,3 +71,16 @@ source_modules =
 forbidden_modules =
     foodgo.infra
     foodgo.contracts
+
+[importlinter:contract:acl]
+name = 付款只透過防腐層找金流服務
+type = forbidden
+source_modules =
+    foodgo.payment.payment
+    foodgo.payment.repository
+    foodgo.payment.postgres
+    foodgo.payment.service
+    foodgo.payment.consumer
+forbidden_modules =
+    foodgo.payment.fakepay
+allow_indirect_imports = True

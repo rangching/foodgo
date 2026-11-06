@@ -144,8 +144,15 @@
 |---|---|---|---|---|
 | `OrderPlaced` v1 | 點餐 | 廚房 | `order_id`、`restaurant_id`、`items`（菜名、份數）、`note` | 單價、外送費、合計：廚房不看價格。`customer_id`、送達地址：廚房用不到，個資能少傳就少傳 |
 | `MealReady` v1 | 廚房 | （練習：外送） | `order_id`、`ticket_id`、`restaurant_id`（到哪裡取餐） | 菜名、備註：外送不在乎菜怎麼做 |
+| `PaymentRequested` v1（第 7 集） | 點餐 | 付款 | `order_id`、`customer_id`（向誰收）、`amount`（合計，整數元） | 菜名：付款不在乎點了什麼。地址：付款用不到 |
+| `DeliveryRequested` v1（第 7 集） | 點餐 | 外送 | `order_id`、`restaurant_id`（取餐點）、`delivery_address`（送達點） | 菜名、價格：外送不在乎 |
+| `PaymentAuthorized` v1（第 7 集） | 付款 | 廚房 | `order_id`、`payment_id` | 金額：廚房不看價格；退款時付款自己查得到 |
+| `PaymentFailed` v1（第 7 集） | 付款 | 廚房 | `order_id`、`payment_id`、`reason` | 卡號、金流服務的錯誤碼：留在付款的防腐層裡 |
+| `TicketAccepted` v1（第 7 集） | 廚房 | 外送 | `order_id`、`ticket_id` | 菜名、備註 |
+| `TicketRejected` v1（第 7 集） | 廚房 | （第 8 集：編排器） | `order_id`、`ticket_id`、`reason` | 菜名、備註 |
+| `CourierAssigned` v1（第 7 集） | 外送 | （第 9 集：追蹤頁） | `order_id`、`delivery_id`、`courier_id` | 外送員的電話、位置：之後要再說 |
 
-`OrderCancelled` 目前沒有別的上下文要聽，先不放進共同語言；等有人需要時再加。之後付款要金額、外送要地址時，也照同一條原則決定加在哪裡。
+`OrderCancelled` 目前沒有別的上下文要聽，先不放進共同語言；等有人需要時再加（第 8 集）。付款要金額、外送要地址時也照同一條原則：第 7 集選了「另發事件」，理由見「付款要金額、外送要地址：放在哪」。
 
 ### 版本規則（`schema_version`）
 
@@ -333,3 +340,137 @@ Order 的每個動作對應一個事件，照順序套上去就能算回整張�
 | 事件歷史 | `history(order_id)`、`GET /orders/{id}/events` | 一張訂單的每一個事件：版本、名稱、時間、內容 |
 
 記憶體版的 `InMemoryOrderRepository` 只記現在的樣子：`as_of` 與 `/events` 回 501。
+
+## 跨服務的交易（第 7 集：Saga 與編舞式）
+
+### 為什麼不用 2PC
+
+「下單、扣款、廚房接單、派外送員」要嘛全部成功、要嘛全部不算。單一資料庫用一個交易就好；跨了四個上下文，直覺的做法是**兩階段提交（2PC，Two-Phase Commit）**：
+
+| | 2PC：一個協調者、所有人一起提交 | Saga：一串本地交易＋補償 |
+|---|---|---|
+| 怎麼做 | 協調者先問每個參與者「準備好了嗎」（prepare），全部說好才叫大家「提交」（commit） | 每一步在自己的資料庫 commit、公告事件；後面失敗了，前面做過的用**補償**反著做一次 |
+| 等的時候 | 每個參與者 prepare 之後鎖著資料，等協調者的下一句話 | 不等：做完就放手 |
+| 協調者當掉 | 大家卡在「準備好了」：不能提交、也不敢放棄（阻塞） | 沒有協調者（編舞式），或協調者把進度存在資料庫、重啟後接著做（第 8 集） |
+| 誰要支援 | 每個參與者都要支援同一種協定（XA）。Kafka、外面的金流服務都不會陪你 prepare | 只要會做本地交易、會發事件 |
+| 可用性 | 四個服務**同時**都活著才下得了單 | 誰慢了、掛了，訊息留在 Kafka，等它回來接著做 |
+| 中間看得到嗎 | 看不到：要嘛都有、要嘛都沒有 | 看得到：付款成功、廚房還沒接單的那一刻是真的存在的（最終一致） |
+
+### 詞
+
+| 詞 | 程式／例子 | 意思 |
+|---|---|---|
+| Saga | 這一集的接力；第 8 集的 `OrderSaga` | 一個跨上下文的流程，拆成一串**本地交易**，每一步都有對應的**補償** |
+| 本地交易 | 付款：`payments`＋`payment_outbox`＋`processed_messages` 一起 commit | 一個上下文、一個資料庫裡的交易。跨上下文只靠事件，沒有共同的交易 |
+| 補償 compensation | 退款 `PaymentRefunded`、取消訂單 `OrderCancelled` | 已經 commit 的事不能 rollback，只能再做一件**新的事**把它抵銷。補償本身也是本地交易、也可能失敗（第 8 集） |
+| 編舞式 choreography | 這一集 | 沒有指揮：每個參與者聽別人的事件、做自己的事、公告結果。流程藏在「誰訂閱誰」裡 |
+| 編排式 orchestration | 第 8 集 | 一個編排器記住流程走到哪，送命令給每個參與者、收回覆；失敗時由它決定補償 |
+| 防腐層 ACL（Anti-Corruption Layer） | `foodgo.payment.gateway` | 外面系統的說法（欄位、單位、錯誤碼）在這裡翻成自己的話，不讓它滲進模型（第 1 集講過的概念） |
+| 誰先到不一定 | `kitchen_payments`、`delivery_tickets` | Kafka 只保證**同一個 partition** 裡的順序；不同 topic 之間沒有先後。聽兩個 topic 的人，要先把聽到的記下來，等兩邊都到了才往下走 |
+
+### A001 的接力
+
+| 棒 | 誰 | 聽到 | 本地交易做什麼 | 公告 | topic |
+|---|---|---|---|---|---|
+| 1 | 點餐（API） | `POST /orders` | `events` 4 列＋`outbox` 3 列 | `OrderPlaced`、`PaymentRequested`、`DeliveryRequested` | `ordering.events` |
+| 2 | 付款 | `PaymentRequested` | 向金流服務要授權；`payments` 一列（P001、230 元） | `PaymentAuthorized`（失敗：`PaymentFailed`） | `payment.events` |
+| 3 | 廚房 | `OrderPlaced` | 開廚房單 T001：`received`（等付款） | — | |
+| 4 | 廚房 | `PaymentAuthorized` | T001 → `accepted`（`FOODGO_FAULT_KITCHEN=reject`：`rejected`） | `TicketAccepted`（拒單：`TicketRejected`） | `kitchen.events` |
+| 5 | 外送 | `DeliveryRequested` | 開配送單 D001：`waiting`（等餐廳接單） | — | |
+| 6 | 外送 | `TicketAccepted` | D001 → `assigned`，外送員 M01 | `CourierAssigned` | `delivery.events` |
+
+3 和 5 可能比 2、4 先發生，也可能晚發生：廚房與外送各聽兩個 topic，先到的先記下來。
+
+### 誰聽什麼、存哪裡
+
+| 上下文 | 程序 | consumer group | 聽 | 發（自己的 outbox → topic） | 自己的表 |
+|---|---|---|---|---|---|
+| 點餐 | `fastapi dev`＋`python -m foodgo.ordering.relay` | — | — | `outbox` → `ordering.events` | `events`、`snapshots`、`outbox` |
+| 付款 | `python -m foodgo.payment.consumer` | `payment` | `ordering.events` | `payment_outbox` → `payment.events` | `payments`、`payment_outbox` |
+| 廚房 | `python -m foodgo.kitchen.consumer` | `kitchen` | `ordering.events`、`payment.events` | `kitchen_outbox` → `kitchen.events` | `tickets`、`kitchen_payments`、`kitchen_outbox` |
+| 外送 | `python -m foodgo.delivery.consumer` | `delivery` | `ordering.events`、`kitchen.events` | `delivery_outbox` → `delivery.events` | `deliveries`、`delivery_tickets`、`delivery_outbox` |
+
+- 每個 consumer 都讀**整個** topic，只挑自己要的 `type`，其他的略過（付款 consumer 也會收到 `OrderPlaced`，印一行「收到」就沒事了）。
+- 冪等照第 4 集：`processed_messages`（`consumer`＋`event_id`），和業務資料寫在同一個交易。「記下聽到的」只做一次；「要不要往下走」看目前的狀態決定，重做幾次結果都一樣。
+- 要公告的事件和業務資料寫在同一個交易（自己的 outbox），consumer 每處理完一則、每閒下來一秒，就把自己 outbox 裡還沒送的送出去：沒有雙寫問題，也不用再多開 relay 程序。
+- 現在四個上下文的表在同一個資料庫，但**沒有一張表被兩個上下文讀寫**：第 10 集拆成四個資料庫時，一行 SQL 都不用改。`processed_messages` 是共用的帳本格式，用 `consumer` 欄位分開。
+
+| 廚房單狀態（第 7 集起） | 意思 |
+|---|---|
+| `received` | 已收單：等付款的結果 |
+| `accepted` | 餐廳已接單（`TicketAccepted`） |
+| `rejected` | 餐廳已拒單（`TicketRejected`） |
+| `cancelled` | 不做了：付款失敗。廚房自己決定的，沒有公告 |
+| `ready` | 餐點已備妥（`MealReady`，第 3 集）。拒單、不做了的單不能出餐 |
+
+| 配送單 | 程式名稱 | 意思 |
+|---|---|---|
+| 配送單 | `Delivery`（D001…） | 取餐點（餐廳編號）、送達點（地址）、外送員 |
+| 配送單狀態 | `DeliveryStatus` | 等餐廳接單 `waiting` → 外送員已指派 `assigned` |
+| 派車台 | `Dispatch` | 外送的應用服務：開配送單、餐廳接單後輪流指派外送員（M01、M02、M03） |
+
+### 付款要金額、外送要地址：放在哪
+
+第 3 集的 `OrderPlaced` 只給廚房，刻意不帶價格與地址。第 7 集付款要金額、外送要地址，兩個選擇：
+
+| | A. `OrderPlaced` 加欄位（`customer_id`、`amount`、`delivery_address`） | B. 另發事件（**選這個**） |
+|---|---|---|
+| 版本規則 | 只加欄位，不升版；廚房寬容讀取，略過不認得的欄位 | `OrderPlaced` 一個字都沒改；新事件 `PaymentRequested`、`DeliveryRequested` 都是第 1 版 |
+| 誰收到什麼 | 聽 `OrderPlaced` 的人全部收到價格、顧客編號、地址——廚房也是 | 付款只拿到金額與顧客，外送只拿到取餐點與地址，廚房照舊 |
+| 之後要改 | 欄位一旦發布就有人照著讀，想再拿掉很難 | 哪一則不需要了，整則停發就好；不影響別人 |
+| 代價 | 一則訊息 | 一次下單三則（同一個交易寫進 outbox、同一個 key，所以順序不會亂） |
+
+選 B 的理由：第 3 集的原則「只放訂閱者**現在**要用的事實」「廚房不看價格」「個資能少傳就少傳」，A 三條都違反。
+
+B 的老實話：
+
+- `PaymentRequested`、`DeliveryRequested` 名字像命令——點餐其實已經知道「下一步是付款、外送」。這種「指名給某個人看的事件」正是編舞式往編排式移動的徵兆，第 8 集改成真的命令。
+- 同一個 topic 的訊息，廚房 consumer 照樣讀得到 bytes，只是不解析。真的要把個資擋在外面，要分 topic 或加密，這門課不做。
+
+### 流程走到哪？
+
+編舞式裡**沒有一個地方**記著 A001 走到哪。要回答「A001 現在怎樣了」，得自己拼：
+
+| 去哪裡查 | 查到什麼 |
+|---|---|
+| 點餐的 `events` | 第 4 版 `placed`（點餐不知道後面發生了什麼） |
+| 付款的 `payments` | P001 `authorized` 230 元 |
+| 廚房的 `tickets`（＋`kitchen_payments`） | T001 `accepted` |
+| 外送的 `deliveries`（＋`delivery_tickets`） | D001 `assigned`，外送員 M01 |
+| 4 個 topic（key＝A001） | 6 則訊息，照時間排起來才看得出先後 |
+| 3 個 consumer group 的 lag | 有沒有人還沒處理完 |
+
+示範腳本把這些拼在一起：`uv run python demos/ep07_choreography.py trace A001`。第 8 集的編排器把進度存在一張 saga 表；第 9 集從事件投影出「訂單追蹤」讀模型——都是在回答這個問題。
+
+### 付款失敗的那一條：編舞式的難處
+
+`FOODGO_FAULT_PAYMENT=decline`（假的金流服務每一筆都拒絕）時，A002 停在半路：
+
+| 上下文 | 知道付款失敗了嗎 | 現在 |
+|---|---|---|
+| 點餐 | 不知道：沒有聽 `payment.events` | `placed`：顧客看到的還是「已送出」 |
+| 付款 | 知道 | P002 `failed`（卡片額度不足） |
+| 廚房 | 知道：聽 `payment.events` | T002 `cancelled`：自己不做了，沒有公告 |
+| 外送 | 不知道 | D002 `waiting`：等一張永遠不會來的 `TicketAccepted` |
+
+誰該取消訂單、告訴顧客、收掉配送單？讓點餐也聽 `payment.events`？那廚房拒單時誰退款——付款也去聽 `kitchen.events`？外送找不到人時呢？每多一種失敗，就多幾條訂閱線，流程散在每個人的程式裡。第 8 集改用編排式：一個編排器負責整條流程與補償。
+
+### 故障開關（第 7 集）
+
+| 環境變數 | 加在哪個程序 | 會怎樣 |
+|---|---|---|
+| `FOODGO_FAULT_PAYMENT=decline` | 付款 consumer | 假的金流服務每一筆都拒絕 → `PaymentFailed` |
+| `FOODGO_FAULT_KITCHEN=reject` | 廚房 consumer | 付款過了也拒單 → `TicketRejected`（第 8 集示範補償用） |
+| `FOODGO_FAULT_KITCHEN=crash` | 廚房 consumer | 第 4 集那一個：收到 `OrderPlaced` 就當掉 |
+
+### 防腐層：付款和金流服務各說各的
+
+| 付款說的（`foodgo.payment.gateway`） | 金流服務說的（`foodgo.payment.fakepay`，假的） |
+|---|---|
+| `authorize("A001", 230)`：新臺幣整數元 | `{"merchant_order_no": "A001", "amount_minor": 23000, "currency": "TWD"}`：單位是「分」 |
+| `Authorization(approved=True, reference="AUTH-0001")` | `{"result": "APPROVED", "auth_code": "AUTH-0001", …}` |
+| `Authorization(approved=False, reason="卡片額度不足")` | `{"result": "DECLINED", "decline_code": "insufficient_funds", …}` |
+
+- 付款的模型與服務只認 `CardGateway` 介面；翻譯全在 `FakePayAdapter`。換一家金流服務，只換 adapter。
+- 第 7 條邊界規則「付款只透過防腐層找金流服務」：`payment.payment／repository／postgres／service／consumer` 直接 import `payment.fakepay` 會被擋（經過 `gateway` 間接用到可以）。
+- 訂單編號當**冪等鍵**（`merchant_order_no`）：付款 consumer 授權完、還沒 commit 就當掉，重送時金流服務回上一次的答案，不會刷兩次卡。

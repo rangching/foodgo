@@ -1,5 +1,5 @@
 """Kafka 的薄薄一層（confluent-kafka）：建 topic、送訊息、以 consumer group 收訊息。"""
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from confluent_kafka import Consumer, KafkaError, KafkaException, Message, Producer
 from confluent_kafka.admin import AdminClient, NewTopic
@@ -55,17 +55,20 @@ class KafkaSender:
 
 
 def consume(
-    topic: str,
+    topics: str | Sequence[str],
     group: str,
     handle: Callable[[Message], None],
     *,
     bootstrap: str | None = None,
     stop_when_idle: float | None = None,
+    on_idle: Callable[[], None] | None = None,
 ) -> None:
     """以 consumer group 的身分收訊息：處理完一則，才提交那一則的位置（offset）。
 
+    topics：一個或好幾個 topic（第 7 集起廚房、外送都要聽兩個）。不同 topic 之間沒有先後保證。
     handle 丟例外就不提交、直接結束。重啟後從上次提交的位置繼續，沒處理完的那一則會再收到一次。
     stop_when_idle：連續幾秒沒有新訊息就結束（給測試用；平常一直收）。
+    on_idle：一秒沒有新訊息就呼叫一次（第 7 集：順便把自己 outbox 裡還沒送的送出去）。
     """
     consumer = Consumer(
         {
@@ -82,12 +85,14 @@ def consume(
         nonlocal assigned
         assigned = True
 
-    consumer.subscribe([topic], on_assign=on_assign)
+    consumer.subscribe([topics] if isinstance(topics, str) else list(topics), on_assign=on_assign)
     idle = 0.0
     try:
         while True:
             message = consumer.poll(1.0)
             if message is None:
+                if on_idle is not None:
+                    on_idle()
                 idle += 1.0 if assigned else 0.0
                 if stop_when_idle is not None and idle >= stop_when_idle:
                     return
