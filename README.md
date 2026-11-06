@@ -4,7 +4,7 @@
 
 ```bash
 git tag -l 'ep*'          # 每集的起點與終點
-git checkout ep07-start   # 跟著第 7 集做（第 1 集是 ep01-start，以此類推）
+git checkout ep08-start   # 跟著第 8 集做（第 1 集是 ep01-start，以此類推）
 ```
 
 逐步指令在上一層的 `steps/epNN.md`，每集的檢查在 `tests/epNN/`。

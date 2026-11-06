@@ -59,9 +59,7 @@ def test_consumer_groups_are_named_after_the_contexts():
     from foodgo.payment import consumer as payment
 
     assert (payment.GROUP, kitchen.GROUP, delivery.GROUP) == ("payment", "kitchen", "delivery")
-    assert payment.LISTENS == ("ordering.events",)
-    assert kitchen.LISTENS == ("ordering.events", "payment.events")
-    assert delivery.LISTENS == ("ordering.events", "kitchen.events")
+    # 第 8 集起預設聽編排器的命令；第 7 集的接力要聽哪些 topic，改在 tests/ep08 檢查（FOODGO_SAGA=choreography）
 
 
 # ---------------------------------------------------------------- 送出一張訂單：三則，各給一個上下文
@@ -101,11 +99,12 @@ def test_one_fact_one_set_of_ids():
     assert {m.occurred_at for m in first} == {first[0].occurred_at}
 
 
-def test_drafts_and_cancellations_announce_nothing():
+def test_cancelling_does_not_ask_for_payment_or_delivery_again():
     order = a001()
     order.pull_events()
     order.cancel("顧客改變心意")
-    assert announcements(order, order.pull_events()) == []  # OrderCancelled 還是不公告（第 8 集補）
+    kinds = [type(m).__name__ for m in announcements(order, order.pull_events())]
+    assert not {"OrderPlaced", "PaymentRequested", "DeliveryRequested"} & set(kinds)  # OrderCancelled 公不公告：第 8 集
 
 
 def test_the_new_events_are_version_1_and_round_trip():

@@ -308,7 +308,7 @@ def test_the_postgres_app_is_event_sourced(db_url, sql):
         assert restarted.post("/orders/A001/cancel", json={"reason": "顧客改變心意"}).json()["version"] == 5
     assert sql("SELECT count(*) FROM events WHERE stream_id = 'A001'") == [(5,)]
     kinds = [kind for (kind,) in sql("SELECT type FROM outbox ORDER BY id")]
-    assert kinds[0] == "OrderPlaced" and "OrderCancelled" not in kinds  # OrderCancelled 還是不對外公告（第 7 集起送出時多兩則）
+    assert kinds[0] == "OrderPlaced"  # 第 7 集起送出時多兩則；OrderCancelled 第 8 集起也公告（在 tests/ep08 檢查）
 
 
 def test_the_kitchen_still_gets_the_order_through_kafka(db_url, topic, group):
