@@ -46,7 +46,7 @@ def test_one_image_five_containers(compose):
         assert svc["command"] == ["python", "-m", f"foodgo.services.{name}"]  # 只差啟動哪一個
         assert svc["restart"] == "unless-stopped"
         assert "healthcheck" not in svc  # 用 Dockerfile 的 HEALTHCHECK
-    assert VERSION == "0.11.0"
+    # 第 12 集：不再寫死 0.11.0——滾動更新把 VERSION 改成 0.12.0，compose 的 image 照樣要跟著它
 
 
 # ---------------------------------------------------------------- 環境變數：第 10 集的那些，換成容器裡的位址
